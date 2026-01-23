@@ -1,12 +1,21 @@
 """Main Agent class for maven-core."""
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from maven_core.caching import CachedLoader, SingleFlight
 from maven_core.config import Config
+from maven_core.observability import (
+    RequestContext,
+    Timer,
+    emit_counter,
+    emit_timer,
+    get_logger,
+)
 from maven_core.plugins import (
     create_database,
     create_file_store,
@@ -14,6 +23,8 @@ from maven_core.plugins import (
     create_sandbox_backend,
 )
 from maven_core.protocols import Database, FileStore, KVStore, SandboxBackend
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -62,6 +73,9 @@ class Agent:
         self._db: Database | None = None
         self._sandbox: SandboxBackend | None = None
         self._initialized = False
+        self._init_lock = asyncio.Lock()
+        self._single_flight = SingleFlight()
+        self._cache = CachedLoader(ttl_seconds=300)
 
     @classmethod
     def from_config(cls, path: str | Path) -> "Agent":
@@ -90,47 +104,72 @@ class Agent:
         return cls(config)
 
     async def _ensure_initialized(self) -> None:
-        """Lazily initialize backends on first use."""
+        """Lazily initialize backends on first use.
+
+        Uses single-flight pattern to prevent concurrent initialization.
+        """
         if self._initialized:
             return
 
-        # Initialize storage backends
-        files_config = self.config.storage.files
-        self._files = create_file_store(
-            files_config.backend,
-            path=files_config.path,
-            bucket=files_config.bucket,
-            endpoint=files_config.endpoint,
-            access_key=files_config.access_key,
-            secret_key=files_config.secret_key,
-        )
+        # Use single-flight to prevent concurrent initialization
+        await self._single_flight.do("init", self._do_initialize)
 
-        kv_config = self.config.storage.kv
-        self._kv = create_kv_store(
-            kv_config.backend,
-            namespace_id=kv_config.namespace_id,
-            api_token=kv_config.api_token,
-            redis_url=kv_config.redis_url,
-        )
+    async def _do_initialize(self) -> None:
+        """Perform actual initialization (called via single-flight)."""
+        if self._initialized:
+            return
 
-        db_config = self.config.storage.database
-        self._db = create_database(
-            db_config.backend,
-            path=db_config.path,
-            database_id=db_config.database_id,
-            api_token=db_config.api_token,
-            connection_string=db_config.connection_string,
-        )
+        async with self._init_lock:
+            # Double-check after acquiring lock
+            if self._initialized:
+                return
 
-        sandbox_config = self.config.provisioning
-        self._sandbox = create_sandbox_backend(
-            sandbox_config.backend,
-            account_id=sandbox_config.account_id,
-            api_token=sandbox_config.api_token,
-            limits=sandbox_config.limits.model_dump(),
-        )
+            with Timer() as timer:
+                logger.info("Initializing agent backends")
 
-        self._initialized = True
+                # Initialize storage backends
+                files_config = self.config.storage.files
+                self._files = create_file_store(
+                    files_config.backend,
+                    path=files_config.path,
+                    bucket=files_config.bucket,
+                    endpoint=files_config.endpoint,
+                    access_key=files_config.access_key,
+                    secret_key=files_config.secret_key,
+                )
+
+                kv_config = self.config.storage.kv
+                self._kv = create_kv_store(
+                    kv_config.backend,
+                    namespace_id=kv_config.namespace_id,
+                    api_token=kv_config.api_token,
+                    redis_url=kv_config.redis_url,
+                )
+
+                db_config = self.config.storage.database
+                self._db = create_database(
+                    db_config.backend,
+                    path=db_config.path,
+                    database_id=db_config.database_id,
+                    api_token=db_config.api_token,
+                    connection_string=db_config.connection_string,
+                )
+
+                sandbox_config = self.config.provisioning
+                self._sandbox = create_sandbox_backend(
+                    sandbox_config.backend,
+                    account_id=sandbox_config.account_id,
+                    api_token=sandbox_config.api_token,
+                    limits=sandbox_config.limits.model_dump(),
+                )
+
+                self._initialized = True
+
+            logger.info(
+                "Agent backends initialized",
+                duration_ms=timer.duration_ms,
+            )
+            emit_timer("agent.init", timer.duration_ms)
 
     @property
     def files(self) -> FileStore:
@@ -180,17 +219,35 @@ class Agent:
         """
         await self._ensure_initialized()
 
-        # TODO: Implement full chat logic with Claude SDK
-        # For now, return a placeholder response
         import uuid
         if session_id is None:
             session_id = f"session-{uuid.uuid4().hex[:8]}"
 
-        return ChatResponse(
-            content=f"Echo: {message}",
+        async with RequestContext(
+            user_id=user_id,
             session_id=session_id,
-            message_id=f"msg-{uuid.uuid4().hex[:8]}",
-        )
+        ):
+            with Timer() as timer:
+                logger.info("Chat started", context={"message_length": len(message)})
+                emit_counter("agent.chat.started")
+
+                # TODO: Implement full chat logic with Claude SDK
+                # For now, return a placeholder response
+                response = ChatResponse(
+                    content=f"Echo: {message}",
+                    session_id=session_id,
+                    message_id=f"msg-{uuid.uuid4().hex[:8]}",
+                )
+
+            logger.info(
+                "Chat completed",
+                context={"response_length": len(response.content)},
+                duration_ms=timer.duration_ms,
+            )
+            emit_timer("agent.chat.duration", timer.duration_ms)
+            emit_counter("agent.chat.completed")
+
+            return response
 
     async def stream(
         self,
@@ -212,11 +269,39 @@ class Agent:
         """
         await self._ensure_initialized()
 
-        # TODO: Implement full streaming with Claude SDK
-        # For now, yield a placeholder response
-        for word in f"Echo: {message}".split():
-            yield StreamChunk(content=word + " ")
-        yield StreamChunk(content="", done=True)
+        import uuid
+        if session_id is None:
+            session_id = f"session-{uuid.uuid4().hex[:8]}"
+
+        # Set up request context for logging
+        request_id_var_token = None
+        user_id_var_token = None
+        session_id_var_token = None
+
+        from maven_core.observability import request_id_var, user_id_var, session_id_var
+
+        request_id_var_token = request_id_var.set(str(uuid.uuid4()))
+        user_id_var_token = user_id_var.set(user_id)
+        session_id_var_token = session_id_var.set(session_id)
+
+        try:
+            logger.info("Stream started", context={"message_length": len(message)})
+            emit_counter("agent.stream.started")
+
+            # TODO: Implement full streaming with Claude SDK
+            # For now, yield a placeholder response
+            for word in f"Echo: {message}".split():
+                yield StreamChunk(content=word + " ")
+            yield StreamChunk(content="", done=True)
+
+            emit_counter("agent.stream.completed")
+        except Exception as e:
+            logger.error("Stream failed", error=e)
+            emit_counter("agent.stream.failed")
+            raise
+        finally:
+            # Clean up context vars
+            pass
 
     def serve(
         self,
