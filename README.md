@@ -140,3 +140,4 @@ ruff check src/
 ## License
 
 MIT
+# maven-core
