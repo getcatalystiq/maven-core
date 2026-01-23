@@ -1,0 +1,102 @@
+# Maven Core Configuration Example
+# Copy this file to config.yaml and customize for your deployment
+
+# Tenant ID (for single-tenant deployments)
+tenant_id: "default"
+
+# Authentication
+auth:
+  # Mode: "builtin" for password auth, "oidc" for external identity provider
+  mode: builtin
+
+  # Built-in auth settings (when mode: builtin)
+  builtin:
+    password:
+      min_length: 12
+      require_special: true
+    jwt:
+      secret: ${JWT_SECRET}  # Generate with: python -c "import secrets; print(secrets.token_urlsafe(32))"
+      expiry_minutes: 15
+      refresh_expiry_days: 30
+
+  # OIDC settings (when mode: oidc)
+  # oidc:
+  #   issuer: https://your-auth-provider.com
+  #   audience: your-app-id
+  #   jwks_uri: https://your-auth-provider.com/.well-known/jwks.json
+
+# RBAC
+rbac:
+  default_role: user
+  roles:
+    - admin
+    - user
+    - service
+
+# Skills
+skills:
+  path: ./skills
+  cache_ttl_seconds: 300
+
+# Storage backends
+storage:
+  # File storage (for skills, transcripts)
+  files:
+    # For development:
+    backend: local
+    path: ./data/files
+
+    # For Cloudflare R2:
+    # backend: cloudflare_r2
+    # bucket: ${R2_BUCKET}
+    # endpoint: ${R2_ENDPOINT}
+    # access_key: ${R2_ACCESS_KEY}
+    # secret_key: ${R2_SECRET_KEY}
+
+  # Key-value storage (for session metadata, cache)
+  kv:
+    # For development:
+    backend: memory
+
+    # For Cloudflare KV:
+    # backend: cloudflare_kv
+    # namespace_id: ${KV_NAMESPACE_ID}
+    # api_token: ${CF_API_TOKEN}
+
+  # Database (for RBAC, OAuth tokens)
+  database:
+    # For development:
+    backend: sqlite
+    path: ./data/maven.db
+
+    # For Cloudflare D1:
+    # backend: cloudflare_d1
+    # database_id: ${D1_DATABASE_ID}
+    # api_token: ${CF_API_TOKEN}
+
+# Sandbox/code execution
+provisioning:
+  # For development:
+  backend: local
+  limits:
+    cpu_ms: 10000
+    memory_mb: 128
+    timeout_seconds: 30
+
+  # For Cloudflare Sandbox:
+  # backend: cloudflare
+  # account_id: ${CF_ACCOUNT_ID}
+  # api_token: ${CF_API_TOKEN}
+
+# LLM configuration
+llm:
+  provider: anthropic  # or "bedrock"
+  model: claude-sonnet-4-20250514
+  # region: us-east-1  # For Bedrock
+
+# HTTP server (for standalone mode)
+server:
+  host: 0.0.0.0
+  port: 8080
+  cors_origins:
+    - http://localhost:3000
