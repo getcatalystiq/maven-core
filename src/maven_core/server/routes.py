@@ -435,6 +435,35 @@ def create_routes(agent: "Agent") -> list[Route]:
             "tenant_id": user.get("tenant_id"),
         })
 
+    async def jwks(request: Request) -> Response:
+        """JWKS endpoint for JWT verification.
+
+        Returns the public keys for verifying JWT tokens signed by this server.
+        This enables clients to verify tokens without sharing secrets.
+        """
+        from maven_core.auth.jwt_utils import create_jwks, load_key_pair
+
+        if not agent.config.auth.builtin or not agent.config.auth.builtin.jwt:
+            return JSONResponse(
+                {"error": "JWT authentication not configured"},
+                status_code=501,
+            )
+
+        try:
+            jwt_config = agent.config.auth.builtin.jwt
+            key_pair = load_key_pair(
+                private_key_path=jwt_config.private_key_path,
+                public_key_path=jwt_config.public_key_path,
+                key_id=jwt_config.key_id,
+            )
+            jwks_data = create_jwks(key_pair)
+            return JSONResponse(jwks_data)
+        except Exception as e:
+            return JSONResponse(
+                {"error": str(e)},
+                status_code=500,
+            )
+
     # Admin endpoints
     @require_admin
     async def admin_users_list(request: Request) -> Response:
@@ -745,6 +774,7 @@ def create_routes(agent: "Agent") -> list[Route]:
         Route("/auth/refresh", auth_refresh, methods=["POST"]),
         Route("/auth/logout", auth_logout, methods=["POST"]),
         Route("/auth/me", auth_me, methods=["GET"]),
+        Route("/.well-known/jwks.json", jwks, methods=["GET"]),
 
         # Chat
         Route("/chat", chat, methods=["POST"]),

@@ -1,13 +1,105 @@
 """Authentication middleware for the HTTP server."""
 
-import json
 from typing import Callable, Any
 
+import jwt
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from maven_core.auth.manager import AuthManager
+
+
+class JWTAuthMiddleware(BaseHTTPMiddleware):
+    """Lightweight JWT authentication middleware using RS256.
+
+    Decodes JWT tokens and adds user info to request.state.
+    Does not require database access - just validates token signature.
+    Uses asymmetric (RS256) signing for unified verification with OIDC.
+    """
+
+    def __init__(
+        self,
+        app: Any,
+        public_key: bytes | None = None,
+        issuer: str | None = None,
+        public_paths: list[str] | None = None,
+    ) -> None:
+        """Initialize JWT auth middleware.
+
+        Args:
+            app: The ASGI application
+            public_key: PEM-encoded RSA public key for JWT validation
+            issuer: Expected JWT issuer claim
+            public_paths: Paths that don't require authentication
+        """
+        super().__init__(app)
+        self.public_key = public_key
+        self.issuer = issuer
+        self.public_paths = set(public_paths or ["/health", "/ping", "/.well-known/jwks.json"])
+
+    async def dispatch(
+        self,
+        request: Request,
+        call_next: Callable[[Request], Any],
+    ) -> Response:
+        """Validate JWT and add user to request state."""
+        # Skip auth for public paths
+        if request.url.path in self.public_paths:
+            return await call_next(request)
+
+        # Check for public key
+        if not self.public_key:
+            return JSONResponse(
+                {"error": "Authentication not configured"},
+                status_code=500,
+            )
+
+        # Get token from Authorization header
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            return JSONResponse(
+                {"error": "Missing or invalid Authorization header"},
+                status_code=401,
+            )
+
+        token = auth_header[7:]  # Remove "Bearer " prefix
+
+        try:
+            # Decode and validate JWT using RS256
+            options = {}
+            if self.issuer:
+                payload = jwt.decode(
+                    token,
+                    self.public_key,
+                    algorithms=["RS256"],
+                    issuer=self.issuer,
+                )
+            else:
+                payload = jwt.decode(
+                    token,
+                    self.public_key,
+                    algorithms=["RS256"],
+                )
+
+            # Add user info to request state
+            request.state.user = payload
+            request.state.user_id = payload.get("sub")
+            request.state.tenant_id = payload.get("tid")
+            request.state.roles = payload.get("roles", [])
+
+        except jwt.ExpiredSignatureError:
+            return JSONResponse(
+                {"error": "Token expired"},
+                status_code=401,
+            )
+        except jwt.InvalidTokenError as e:
+            return JSONResponse(
+                {"error": f"Invalid token: {str(e)}"},
+                status_code=401,
+            )
+
+        return await call_next(request)
 
 
 class AuthenticationMiddleware(BaseHTTPMiddleware):
@@ -99,6 +191,7 @@ class TenantMiddleware(BaseHTTPMiddleware):
         header_name: str = "X-Tenant-ID",
         query_param: str = "tenant_id",
         enforce_tenant_match: bool = True,
+        public_paths: list[str] | None = None,
     ) -> None:
         """Initialize tenant middleware.
 
@@ -107,11 +200,13 @@ class TenantMiddleware(BaseHTTPMiddleware):
             header_name: Header to extract tenant ID from
             query_param: Query param to extract tenant ID from
             enforce_tenant_match: Whether to enforce tenant ID matches user's tenant
+            public_paths: Paths that don't require tenant context
         """
         super().__init__(app)
         self.header_name = header_name
         self.query_param = query_param
         self.enforce_tenant_match = enforce_tenant_match
+        self.public_paths = set(public_paths or ["/health", "/ping"])
 
     async def dispatch(
         self,
@@ -130,6 +225,10 @@ class TenantMiddleware(BaseHTTPMiddleware):
         Returns:
             Response from handler, 400 for missing tenant, or 403 for mismatch
         """
+        # Skip tenant validation for public paths
+        if request.url.path in self.public_paths:
+            return await call_next(request)
+
         # Try to get tenant ID from header, then query param
         tenant_id = request.headers.get(self.header_name)
         if not tenant_id:

@@ -15,7 +15,11 @@ auth:
       min_length: 12
       require_special: true
     jwt:
-      secret: ${JWT_SECRET}  # Generate with: python -c "import secrets; print(secrets.token_urlsafe(32))"
+      # RS256 asymmetric signing (auto-generated if paths not provided)
+      private_key_path: ./data/keys/jwt_private.pem
+      public_key_path: ./data/keys/jwt_public.pem
+      key_id: maven-core-1
+      issuer: ${MAVEN_CORE_URL}  # e.g., http://localhost:8080
       expiry_minutes: 15
       refresh_expiry_days: 30
 

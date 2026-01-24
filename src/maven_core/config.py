@@ -37,9 +37,14 @@ class PasswordAuthConfig(BaseModel):
 
 
 class JWTConfig(BaseModel):
-    """JWT settings for built-in auth."""
+    """JWT settings for built-in auth using RS256 asymmetric signing."""
 
-    secret: str
+    # RSA key paths (auto-generated if not provided)
+    private_key_path: str | None = None
+    public_key_path: str | None = None
+    key_id: str = "maven-core-1"
+    # Issuer claim (typically the API URL, auto-detected from server config)
+    issuer: str | None = None
     expiry_minutes: int = 15
     refresh_expiry_days: int = 30
 

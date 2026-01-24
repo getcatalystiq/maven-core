@@ -4,10 +4,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from maven_core.auth.jwt_utils import (
+    JWTKeyPair,
     TokenPayload,
     create_access_token,
+    create_jwks,
     create_refresh_token,
     decode_token,
+    load_key_pair,
 )
 from maven_core.auth.oidc import OIDCTokenPayload, OIDCValidator
 from maven_core.auth.password import hash_password, needs_rehash, verify_password
@@ -45,8 +48,11 @@ class AuthManager:
     """Manages authentication for maven-core.
 
     Supports two authentication modes:
-    - builtin: Password-based authentication with JWT tokens
+    - builtin: Password-based authentication with RS256 JWT tokens
     - oidc: External OIDC identity provider (Clerk, Auth0, etc.)
+
+    Both modes use RS256 asymmetric signing for JWT tokens, enabling
+    unified JWKS-based verification for all clients.
     """
 
     def __init__(
@@ -54,6 +60,7 @@ class AuthManager:
         config: AuthConfig,
         database: Database,
         tenant_id: str,
+        issuer: str | None = None,
     ) -> None:
         """Initialize authentication manager.
 
@@ -61,11 +68,14 @@ class AuthManager:
             config: Authentication configuration
             database: Database backend for user storage
             tenant_id: Current tenant ID
+            issuer: JWT issuer URL (typically the API URL)
         """
         self.config = config
         self.database = database
         self.tenant_id = tenant_id
         self._oidc_validator: OIDCValidator | None = None
+        self._key_pair: JWTKeyPair | None = None
+        self._issuer = issuer or "https://api.maven.local"
 
         # Initialize OIDC validator if configured
         if config.mode == "oidc" and config.oidc:
@@ -74,6 +84,30 @@ class AuthManager:
                 audience=config.oidc.audience,
                 jwks_uri=config.oidc.jwks_uri,
             )
+
+        # Initialize JWT key pair for builtin mode
+        if config.mode == "builtin" and config.builtin and config.builtin.jwt:
+            jwt_config = config.builtin.jwt
+            self._key_pair = load_key_pair(
+                private_key_path=jwt_config.private_key_path,
+                public_key_path=jwt_config.public_key_path,
+                key_id=jwt_config.key_id,
+            )
+            if jwt_config.issuer:
+                self._issuer = jwt_config.issuer
+
+    def get_jwks(self) -> dict[str, Any]:
+        """Get the JWKS (JSON Web Key Set) for token verification.
+
+        Returns:
+            JWKS dictionary with public keys
+
+        Raises:
+            AuthError: If no key pair is configured
+        """
+        if not self._key_pair:
+            raise AuthError("No JWT key pair configured")
+        return create_jwks(self._key_pair)
 
     async def register(
         self,
@@ -169,7 +203,7 @@ class AuthManager:
             password: User's password
 
         Returns:
-            Authentication tokens
+            Authentication tokens (RS256 signed)
 
         Raises:
             InvalidCredentialsError: If credentials are invalid
@@ -179,6 +213,9 @@ class AuthManager:
 
         if not self.config.builtin or not self.config.builtin.jwt:
             raise AuthError("JWT configuration required for password auth")
+
+        if not self._key_pair:
+            raise AuthError("JWT key pair not initialized")
 
         from maven_core.utils.validation import validate_email
 
@@ -222,12 +259,14 @@ class AuthManager:
         )
         roles = [r.name for r in role_rows]
 
-        # Create tokens
+        # Create tokens using RS256
         jwt_config = self.config.builtin.jwt
         access_token = create_access_token(
             user_id=user.id,
             tenant_id=self.tenant_id,
-            secret=jwt_config.secret,
+            private_key=self._key_pair.private_key,
+            key_id=self._key_pair.key_id,
+            issuer=self._issuer,
             expiry_minutes=jwt_config.expiry_minutes,
             email=email,
             roles=roles,
@@ -235,7 +274,9 @@ class AuthManager:
         refresh_token = create_refresh_token(
             user_id=user.id,
             tenant_id=self.tenant_id,
-            secret=jwt_config.secret,
+            private_key=self._key_pair.private_key,
+            key_id=self._key_pair.key_id,
+            issuer=self._issuer,
             expiry_days=jwt_config.refresh_expiry_days,
         )
 
@@ -264,8 +305,15 @@ class AuthManager:
         if not self.config.builtin or not self.config.builtin.jwt:
             raise AuthError("JWT configuration required")
 
+        if not self._key_pair:
+            raise AuthError("JWT key pair not initialized")
+
         jwt_config = self.config.builtin.jwt
-        payload = decode_token(refresh_token, jwt_config.secret)
+        payload = decode_token(
+            refresh_token,
+            self._key_pair.public_key,
+            issuer=self._issuer,
+        )
 
         if payload.token_type != "refresh":
             raise TokenInvalidError("Not a refresh token")
@@ -288,7 +336,9 @@ class AuthManager:
         access_token = create_access_token(
             user_id=payload.user_id,
             tenant_id=self.tenant_id,
-            secret=jwt_config.secret,
+            private_key=self._key_pair.private_key,
+            key_id=self._key_pair.key_id,
+            issuer=self._issuer,
             expiry_minutes=jwt_config.expiry_minutes,
             email=payload.email,
             roles=roles,
@@ -319,11 +369,15 @@ class AuthManager:
             return await self._validate_builtin_token(token)
 
     async def _validate_builtin_token(self, token: str) -> User:
-        """Validate a built-in JWT token."""
-        if not self.config.builtin or not self.config.builtin.jwt:
-            raise AuthError("JWT configuration required")
+        """Validate a built-in RS256 JWT token."""
+        if not self._key_pair:
+            raise AuthError("JWT key pair not initialized")
 
-        payload = decode_token(token, self.config.builtin.jwt.secret)
+        payload = decode_token(
+            token,
+            self._key_pair.public_key,
+            issuer=self._issuer,
+        )
 
         if payload.token_type != "access":
             raise TokenInvalidError("Not an access token")
