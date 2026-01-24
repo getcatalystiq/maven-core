@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 # Install dependencies (dev mode)
-pip install -e ".[dev]"
+uv pip install -e ".[dev]"
 
 # Run all tests with coverage
 pytest

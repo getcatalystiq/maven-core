@@ -1,7 +1,7 @@
 """HTTP Server module."""
 
 from maven_core.server.app import create_app
-from maven_core.server.routes import SSEResponse, create_routes, format_sse
+from maven_core.server.routes import NDJSONResponse, create_routes, format_ndjson
 from maven_core.server.middleware import (
     AuthenticationMiddleware,
     RateLimitMiddleware,
@@ -10,10 +10,10 @@ from maven_core.server.middleware import (
 
 __all__ = [
     "AuthenticationMiddleware",
+    "NDJSONResponse",
     "RateLimitMiddleware",
-    "SSEResponse",
     "TenantMiddleware",
     "create_app",
     "create_routes",
-    "format_sse",
+    "format_ndjson",
 ]

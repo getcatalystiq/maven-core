@@ -5,7 +5,7 @@ Get started with maven-core in under 5 minutes.
 ## Installation
 
 ```bash
-pip install maven-core
+uv pip install maven-core
 ```
 
 ## Basic Usage

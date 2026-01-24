@@ -1,4 +1,8 @@
-"""HTTP route handlers with SSE streaming support."""
+"""HTTP route handlers with Streamable HTTP streaming.
+
+Uses NDJSON (newline-delimited JSON) over chunked HTTP per MCP 2025 spec.
+Simple, stateless, no special protocol needed.
+"""
 
 import functools
 import json
@@ -33,10 +37,14 @@ def require_admin(handler: Callable[[Request], Awaitable[Response]]) -> Callable
     return wrapper
 
 
-class SSEResponse(StreamingResponse):
-    """Server-Sent Events response."""
+class NDJSONResponse(StreamingResponse):
+    """Newline-delimited JSON streaming response (Streamable HTTP).
 
-    media_type = "text/event-stream"
+    Modern streaming format per MCP 2025 spec. Each chunk is a JSON object
+    followed by a newline, enabling simple parsing without special protocols.
+    """
+
+    media_type = "application/x-ndjson"
 
     def __init__(
         self,
@@ -44,49 +52,31 @@ class SSEResponse(StreamingResponse):
         status_code: int = 200,
         headers: dict | None = None,
     ) -> None:
-        """Initialize SSE response.
-
-        Args:
-            content: Async iterator of SSE-formatted strings
-            status_code: HTTP status code
-            headers: Additional headers
-        """
-        sse_headers = {
+        ndjson_headers = {
             "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",  # For nginx
+            "X-Accel-Buffering": "no",
         }
         if headers:
-            sse_headers.update(headers)
+            ndjson_headers.update(headers)
 
         super().__init__(
             content=content,
             status_code=status_code,
-            headers=sse_headers,
+            headers=ndjson_headers,
             media_type=self.media_type,
         )
 
 
-def format_sse(event: str, data: dict | str, event_id: str | None = None) -> str:
-    """Format a message for Server-Sent Events.
+def format_ndjson(data: dict) -> str:
+    """Format data as NDJSON line.
 
     Args:
-        event: Event type (e.g., "message", "error", "done")
-        data: Data to send (dict will be JSON-encoded)
-        event_id: Optional event ID
+        data: Data to serialize
 
     Returns:
-        SSE-formatted string
+        JSON string followed by newline
     """
-    lines = []
-    if event_id:
-        lines.append(f"id: {event_id}")
-    lines.append(f"event: {event}")
-    if isinstance(data, dict):
-        data = json.dumps(data)
-    lines.append(f"data: {data}")
-    lines.append("")  # Empty line to end the event
-    return "\n".join(lines) + "\n"
+    return json.dumps(data) + "\n"
 
 
 def create_routes(agent: "Agent") -> list[Route]:
@@ -145,14 +135,12 @@ def create_routes(agent: "Agent") -> list[Route]:
             )
 
     async def chat_stream(request: Request) -> Response:
-        """Chat endpoint with SSE streaming.
+        """Chat endpoint with streaming response (Streamable HTTP).
 
-        Streams response chunks as Server-Sent Events.
-
-        Event types:
-        - "content": Content chunk with partial response
-        - "done": Final event with complete message info
-        - "error": Error occurred during processing
+        Returns NDJSON stream with chunks:
+            {"type": "chunk", "content": "..."}
+            {"type": "done", "content": "...", "session_id": "..."}
+            {"type": "error", "error": "..."}
         """
         try:
             body = await request.json()
@@ -173,7 +161,7 @@ def create_routes(agent: "Agent") -> list[Route]:
         session_id = body.get("session_id")
 
         async def generate() -> AsyncIterator[str]:
-            """Generate SSE events from agent stream."""
+            """Generate NDJSON stream."""
             try:
                 full_content = ""
                 async for chunk in agent.stream(
@@ -182,22 +170,24 @@ def create_routes(agent: "Agent") -> list[Route]:
                     session_id=session_id,
                 ):
                     if chunk.done:
-                        # Send final event with full content
-                        yield format_sse("done", {
+                        yield format_ndjson({
+                            "type": "done",
                             "content": full_content,
                             "session_id": session_id or "unknown",
                         })
                     else:
                         full_content += chunk.content
-                        yield format_sse("content", {
-                            "chunk": chunk.content,
+                        yield format_ndjson({
+                            "type": "chunk",
+                            "content": chunk.content,
                         })
             except Exception as e:
-                yield format_sse("error", {
+                yield format_ndjson({
+                    "type": "error",
                     "error": str(e),
                 })
 
-        return SSEResponse(generate())
+        return NDJSONResponse(generate())
 
     async def skills(request: Request) -> Response:
         """List available skills.

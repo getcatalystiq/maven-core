@@ -15,7 +15,7 @@ A modular, open-source Python framework for building and managing AI agents.
 ## Installation
 
 ```bash
-pip install maven-core
+uv pip install maven-core
 ```
 
 ## Quick Start
@@ -98,7 +98,7 @@ npm run deploy
 
 ```bash
 # Install dependencies
-pip install -e ".[dev]"
+uv pip install -e ".[dev]"
 
 # Run tests
 pytest

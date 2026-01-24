@@ -5,7 +5,7 @@ from starlette.testclient import TestClient
 
 from maven_core.agent import Agent
 from maven_core.server.app import create_app
-from maven_core.server.routes import format_sse, SSEResponse
+from maven_core.server.routes import format_ndjson, NDJSONResponse
 
 
 @pytest.fixture
@@ -109,27 +109,33 @@ class TestChatEndpoint:
 class TestStreamEndpoint:
     """Tests for streaming chat endpoint."""
 
-    def test_stream_returns_sse(self, client: TestClient) -> None:
-        """Stream returns SSE content type."""
+    def test_stream_returns_ndjson_by_default(self, client: TestClient) -> None:
+        """Stream returns NDJSON content type by default (Streamable HTTP)."""
         response = client.post(
             "/chat/stream",
             json={"message": "Hello"},
         )
 
         assert response.status_code == 200
-        assert "text/event-stream" in response.headers["content-type"]
+        assert "application/x-ndjson" in response.headers["content-type"]
 
-    def test_stream_contains_events(self, client: TestClient) -> None:
-        """Stream contains SSE events."""
+    def test_stream_contains_ndjson_chunks(self, client: TestClient) -> None:
+        """Stream contains NDJSON chunks."""
         response = client.post(
             "/chat/stream",
             json={"message": "Hello"},
         )
 
         content = response.text
-        assert "event: content" in content
-        assert "event: done" in content
-        assert "data:" in content
+        lines = [line for line in content.strip().split("\n") if line]
+        assert len(lines) >= 1
+
+        # Parse each line as JSON
+        import json
+        for line in lines:
+            data = json.loads(line)
+            assert "type" in data
+            assert data["type"] in ("chunk", "done", "error")
 
     def test_invocations_alias(self, client: TestClient) -> None:
         """Invocations endpoint is an alias for stream."""
@@ -139,7 +145,8 @@ class TestStreamEndpoint:
         )
 
         assert response.status_code == 200
-        assert "text/event-stream" in response.headers["content-type"]
+        # Default is now NDJSON
+        assert "application/x-ndjson" in response.headers["content-type"]
 
     def test_stream_missing_message(self, client: TestClient) -> None:
         """Stream returns 400 when message is missing."""
@@ -260,27 +267,37 @@ class TestOAuthEndpoints:
         assert data["success"] is True
 
 
-class TestFormatSSE:
-    """Tests for SSE formatting."""
+class TestFormatNDJSON:
+    """Tests for NDJSON formatting (Streamable HTTP)."""
 
-    def test_format_sse_basic(self) -> None:
-        """Format SSE with basic data."""
-        result = format_sse("message", {"text": "Hello"})
+    def test_format_ndjson_basic(self) -> None:
+        """Format NDJSON with basic data."""
+        import json
+        result = format_ndjson({"type": "chunk", "content": "Hello"})
 
-        assert "event: message" in result
-        assert 'data: {"text": "Hello"}' in result
-        assert result.endswith("\n\n")
+        assert result.endswith("\n")
+        parsed = json.loads(result)
+        assert parsed["type"] == "chunk"
+        assert parsed["content"] == "Hello"
 
-    def test_format_sse_with_id(self) -> None:
-        """Format SSE with event ID."""
-        result = format_sse("message", "data", event_id="123")
+    def test_format_ndjson_complex(self) -> None:
+        """Format NDJSON with complex nested data."""
+        import json
+        data = {
+            "type": "done",
+            "content": "Full response",
+            "metadata": {"session_id": "123", "tokens": 42},
+        }
+        result = format_ndjson(data)
 
-        assert "id: 123" in result
-        assert "event: message" in result
-        assert "data: data" in result
+        parsed = json.loads(result)
+        assert parsed == data
 
-    def test_format_sse_string_data(self) -> None:
-        """Format SSE with string data."""
-        result = format_sse("ping", "pong")
+    def test_format_ndjson_is_single_line(self) -> None:
+        """NDJSON output is a single line."""
+        result = format_ndjson({"key": "value"})
 
-        assert "data: pong" in result
+        # Should be exactly one line (content + newline)
+        lines = result.split("\n")
+        assert len(lines) == 2  # content + empty string after final newline
+        assert lines[1] == ""
