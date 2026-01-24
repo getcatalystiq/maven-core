@@ -110,14 +110,28 @@ provisioning:
   # account_id: ${CF_ACCOUNT_ID}
   # api_token: ${CF_API_TOKEN}
 
-# LLM configuration
+# LLM configuration (Claude Agent SDK)
 llm:
-  provider: anthropic  # anthropic | bedrock
-  model: claude-sonnet-4-20250514
+  provider: claude  # claude | mock
+  backend: anthropic  # anthropic | bedrock | vertex
+  model: claude-sonnet-4-20250514  # Optional, auto-detected
+  allowed_tools:
+    - Read
+    - Write
+    - Bash
+    - Glob
+    - Grep
+  permission_mode: default  # default | acceptEdits | bypassPermissions
 
-  # For Bedrock:
-  # provider: bedrock
-  # region: us-east-1
+  # For AWS Bedrock:
+  # backend: bedrock
+  # model: us.anthropic.claude-opus-4-5-20251101-v1:0
+  # aws_region: us-east-1
+  # aws_profile: default
+
+  # For Google Vertex AI:
+  # backend: vertex
+  # model: claude-sonnet-4@20250514
 
 # HTTP server configuration
 server:
@@ -157,6 +171,33 @@ server:
 | `local` | Subprocess-based (development) | None |
 | `cloudflare` | Cloudflare Sandbox | `account_id`, `api_token` |
 
+## LLM Backends
+
+Maven-core uses the Claude Agent SDK with configurable backends.
+
+| Backend | Description | Required Setup |
+|---------|-------------|----------------|
+| `anthropic` | Direct Anthropic API | `ANTHROPIC_API_KEY` env var |
+| `bedrock` | AWS Bedrock | AWS credentials, Bedrock access enabled |
+| `vertex` | Google Vertex AI | GCP credentials, project ID |
+
+### LLM Configuration Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `provider` | LLM provider (`claude` or `mock`) | `claude` |
+| `backend` | API backend (`anthropic`, `bedrock`, `vertex`) | `anthropic` |
+| `model` | Model ID (backend-specific format) | Auto-detected |
+| `allowed_tools` | Claude Code tools to enable | `["Read", "Glob", "Grep"]` |
+| `cwd` | Working directory for file operations | None |
+| `system_prompt` | Custom system prompt | None |
+| `max_turns` | Maximum conversation turns | Unlimited |
+| `permission_mode` | Tool permission mode | `default` |
+| `aws_region` | AWS region (Bedrock only) | None |
+| `aws_profile` | AWS profile (Bedrock only) | None |
+
+For detailed backend configuration, see [Multi-Backend LLM Configuration](solutions/configuration-guides/multi-backend-llm-configuration.md).
+
 ## Environment Variables
 
 Common environment variables:
@@ -164,6 +205,18 @@ Common environment variables:
 ```bash
 # Required
 JWT_SECRET=your-jwt-secret
+
+# LLM - Anthropic API (default)
+ANTHROPIC_API_KEY=sk-ant-...
+
+# LLM - AWS Bedrock (if using backend: bedrock)
+# AWS_REGION=us-east-1
+# AWS_PROFILE=default
+# Or use IAM role, ~/.aws/credentials
+
+# LLM - Google Vertex AI (if using backend: vertex)
+# GOOGLE_CLOUD_PROJECT=your-project-id
+# GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
 
 # Cloudflare (if using)
 CF_ACCOUNT_ID=your-account-id

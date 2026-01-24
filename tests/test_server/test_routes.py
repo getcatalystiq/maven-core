@@ -18,6 +18,7 @@ def agent(tmp_path) -> Agent:
             "database": {"backend": "sqlite", "path": str(tmp_path / "db.sqlite")},
         },
         "provisioning": {"backend": "local"},
+        "llm": {"provider": "mock", "model": "mock"},
     }
     return Agent.from_dict(config)
 

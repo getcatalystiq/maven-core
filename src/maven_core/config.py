@@ -2,7 +2,6 @@
 
 import os
 import re
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -174,11 +173,20 @@ class CloudflareConfig(BaseModel):
 
 
 class LLMConfig(BaseModel):
-    """LLM provider configuration."""
+    """LLM configuration for Claude Agent SDK."""
 
-    provider: str = "anthropic"  # anthropic | bedrock
-    model: str = "claude-sonnet-4-20250514"
-    region: str | None = None  # For Bedrock
+    provider: str = "claude"  # claude | mock
+    backend: str = "anthropic"  # anthropic | bedrock | vertex
+    model: str | None = None  # Model ID (auto-detected if not set)
+    allowed_tools: list[str] = Field(default_factory=lambda: ["Read", "Glob", "Grep"])
+    cwd: str | None = None  # Working directory for file operations
+    system_prompt: str | None = None
+    max_turns: int | None = None
+    permission_mode: str = "default"  # default | acceptEdits | bypassPermissions
+
+    # AWS Bedrock settings
+    aws_region: str | None = None
+    aws_profile: str | None = None
 
 
 class ServerConfig(BaseModel):

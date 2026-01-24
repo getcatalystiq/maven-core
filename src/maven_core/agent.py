@@ -2,13 +2,13 @@
 
 import asyncio
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from maven_core.caching import TTLCache
 from maven_core.config import Config
+from maven_core.llm import create_llm_client
 from maven_core.observability import (
     RequestContext,
     Timer,
@@ -72,6 +72,7 @@ class Agent:
         self._kv: KVStore | None = None
         self._db: Database | None = None
         self._sandbox: SandboxBackend | None = None
+        self._llm: Any = None
         self._initialized = False
         self._init_lock = asyncio.Lock()
         self._cache: TTLCache[str] = TTLCache(ttl_seconds=300)
@@ -157,6 +158,21 @@ class Agent:
                 limits=sandbox_config.limits.model_dump(),
             )
 
+            # Initialize LLM client (Claude Agent SDK)
+            llm_config = self.config.llm
+            self._llm = create_llm_client(
+                provider=llm_config.provider,
+                backend=llm_config.backend,
+                model=llm_config.model,
+                allowed_tools=llm_config.allowed_tools,
+                cwd=llm_config.cwd,
+                system_prompt=llm_config.system_prompt,
+                max_turns=llm_config.max_turns,
+                permission_mode=llm_config.permission_mode,
+                aws_region=llm_config.aws_region,
+                aws_profile=llm_config.aws_profile,
+            )
+
             self._initialized = True
 
         logger.info(
@@ -193,6 +209,13 @@ class Agent:
             raise RuntimeError("Agent not initialized. Use async context manager or call chat/stream first.")
         return self._sandbox
 
+    @property
+    def llm(self) -> Any:
+        """Get the LLM client (Claude Agent SDK)."""
+        if self._llm is None:
+            raise RuntimeError("Agent not initialized. Use async context manager or call chat/stream first.")
+        return self._llm
+
     async def chat(
         self,
         message: str,
@@ -225,10 +248,11 @@ class Agent:
                 logger.info("Chat started", context={"message_length": len(message)})
                 emit_counter("agent.chat.started")
 
-                # TODO: Implement full chat logic with Claude SDK
-                # For now, return a placeholder response
+                # Call LLM (Claude Agent SDK)
+                content = await self.llm.complete(message)
+
                 response = ChatResponse(
-                    content=f"Echo: {message}",
+                    content=content,
                     session_id=session_id,
                     message_id=f"msg-{uuid.uuid4().hex[:8]}",
                 )
@@ -272,7 +296,7 @@ class Agent:
         user_id_var_token = None
         session_id_var_token = None
 
-        from maven_core.observability import request_id_var, user_id_var, session_id_var
+        from maven_core.observability import request_id_var, session_id_var, user_id_var
 
         request_id_var_token = request_id_var.set(str(uuid.uuid4()))
         user_id_var_token = user_id_var.set(user_id)
@@ -282,11 +306,14 @@ class Agent:
             logger.info("Stream started", context={"message_length": len(message)})
             emit_counter("agent.stream.started")
 
-            # TODO: Implement full streaming with Claude SDK
-            # For now, yield a placeholder response
-            for word in f"Echo: {message}".split():
-                yield StreamChunk(content=word + " ")
-            yield StreamChunk(content="", done=True)
+            # Stream from LLM (Claude Agent SDK)
+            async for event in self.llm.stream(message):
+                if event.type == "text":
+                    yield StreamChunk(content=event.content)
+                elif event.type == "done":
+                    yield StreamChunk(content="", done=True)
+                elif event.type == "error":
+                    raise RuntimeError(event.error or "LLM stream error")
 
             emit_counter("agent.stream.completed")
         except Exception as e:

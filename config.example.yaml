@@ -88,11 +88,36 @@ provisioning:
   # account_id: ${CF_ACCOUNT_ID}
   # api_token: ${CF_API_TOKEN}
 
-# LLM configuration
+# LLM configuration (Claude Agent SDK)
 llm:
-  provider: anthropic  # or "bedrock"
-  model: claude-sonnet-4-20250514
-  # region: us-east-1  # For Bedrock
+  provider: claude  # or "mock" for testing
+
+  # Backend: "anthropic" (default), "bedrock", or "vertex"
+  backend: anthropic
+
+  # For Anthropic API (default):
+  # Set ANTHROPIC_API_KEY environment variable
+
+  # For AWS Bedrock:
+  # backend: bedrock
+  # model: us.anthropic.claude-sonnet-4-20250514-v1:0
+  # aws_region: us-east-1
+  # aws_profile: default  # Optional, uses default credential chain if not set
+
+  # For Google Vertex AI:
+  # backend: vertex
+  # model: claude-sonnet-4@20250514
+
+  allowed_tools:
+    - Read
+    - Write
+    - Bash
+    - Glob
+    - Grep
+  # cwd: ./workspace  # Working directory for file operations
+  # system_prompt: "You are a helpful assistant"
+  # max_turns: 10  # Limit conversation turns
+  # permission_mode: acceptEdits  # Auto-accept file edits
 
 # HTTP server (for standalone mode)
 server:
