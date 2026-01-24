@@ -1,6 +1,43 @@
 -- Maven Core RBAC Schema
 -- Run this to initialize the database tables for authentication and authorization
 
+-- Tenants table
+CREATE TABLE IF NOT EXISTS tenants (
+    tenant_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    tier TEXT DEFAULT 'starter',
+    settings TEXT DEFAULT '{}',
+    limits TEXT DEFAULT '{}',
+    metadata TEXT DEFAULT '{}',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_tenants_status ON tenants(status);
+CREATE INDEX IF NOT EXISTS idx_tenants_tier ON tenants(tier);
+
+-- Provisioning jobs table (tracks async tenant provisioning)
+CREATE TABLE IF NOT EXISTS provisioning_jobs (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    tenant_name TEXT NOT NULL,
+    tier TEXT NOT NULL DEFAULT 'starter',
+    status TEXT NOT NULL DEFAULT 'pending',
+    current_step INTEGER DEFAULT 0,
+    total_steps INTEGER DEFAULT 13,
+    steps_completed TEXT DEFAULT '[]',
+    steps_skipped TEXT DEFAULT '[]',
+    current_step_name TEXT,
+    error TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    completed_at TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_provisioning_jobs_status ON provisioning_jobs(status);
+CREATE INDEX IF NOT EXISTS idx_provisioning_jobs_tenant ON provisioning_jobs(tenant_id);
+
 -- Roles table
 CREATE TABLE IF NOT EXISTS roles (
     id TEXT PRIMARY KEY,
