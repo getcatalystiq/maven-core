@@ -1,7 +1,7 @@
 """Sandbox protocol for code execution backends."""
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 
 @dataclass
@@ -14,6 +14,7 @@ class SandboxResult:
     files: dict[str, bytes]
 
 
+@runtime_checkable
 class SandboxBackend(Protocol):
     """Protocol for sandbox/code execution backends (Cloudflare Sandbox, Docker, subprocess)."""
 

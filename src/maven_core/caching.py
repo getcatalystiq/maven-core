@@ -1,13 +1,15 @@
-"""TTL-based caching with single-flight deduplication.
+"""TTL-based caching with stampede protection.
 
 Provides in-memory caching with configurable TTL and protection against
-cache stampedes via single-flight deduplication.
+cache stampedes via lock-based deduplication.
 """
+
+from __future__ import annotations
 
 import asyncio
 import time
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Generic, TypeVar
+from typing import Awaitable, Callable, Generic, TypeVar
 
 T = TypeVar("T")
 
@@ -33,12 +35,15 @@ class CacheEntry(Generic[T]):
 
 
 class TTLCache(Generic[T]):
-    """Thread-safe TTL cache with optional stale-while-revalidate.
+    """Thread-safe TTL cache with stampede protection.
 
     Example:
         cache = TTLCache[str](ttl_seconds=300)
         await cache.set("key", "value")
         value = await cache.get("key")
+
+        # Or use get_or_set for atomic cache-or-compute:
+        value = await cache.get_or_set("key", lambda: fetch_from_api())
     """
 
     def __init__(
@@ -58,7 +63,16 @@ class TTLCache(Generic[T]):
         self.stale_ttl_seconds = stale_ttl_seconds
         self.max_size = max_size
         self._cache: dict[str, CacheEntry[T]] = {}
-        self._lock = asyncio.Lock()
+        self._cache_lock = asyncio.Lock()  # For cache mutations
+        self._key_locks: dict[str, asyncio.Lock] = {}  # Per-key locks for get_or_set
+        self._locks_lock = asyncio.Lock()  # For managing key locks
+
+    async def _get_key_lock(self, key: str) -> asyncio.Lock:
+        """Get or create a lock for a specific key."""
+        async with self._locks_lock:
+            if key not in self._key_locks:
+                self._key_locks[key] = asyncio.Lock()
+            return self._key_locks[key]
 
     async def get(self, key: str) -> T | None:
         """Get a value from cache.
@@ -74,8 +88,10 @@ class TTLCache(Generic[T]):
                 stale_expires = entry.expires_at + self.stale_ttl_seconds
                 if time.time() <= stale_expires:
                     return entry.value
-            # Truly expired
+            # Truly expired - clean up cache entry
             del self._cache[key]
+            # Note: Per-key lock cleanup is deferred since we're in a sync context.
+            # Locks are cleaned up during cleanup_expired(), delete(), or _evict_oldest().
             return None
         return entry.value
 
@@ -86,7 +102,8 @@ class TTLCache(Generic[T]):
     ) -> T:
         """Get value from cache or compute and store it.
 
-        Uses single-flight to prevent cache stampedes.
+        Uses per-key locking to prevent cache stampedes - only one caller
+        computes the value while others wait for the same key.
 
         Args:
             key: Cache key
@@ -100,8 +117,9 @@ class TTLCache(Generic[T]):
         if value is not None:
             return value
 
-        # Need to compute - use single-flight
-        async with self._lock:
+        # Need to compute - use per-key lock to prevent stampede
+        key_lock = await self._get_key_lock(key)
+        async with key_lock:
             # Double-check after acquiring lock
             value = await self.get(key)
             if value is not None:
@@ -120,7 +138,7 @@ class TTLCache(Generic[T]):
             value: Value to cache
             ttl: Optional TTL override
         """
-        async with self._lock:
+        async with self._cache_lock:
             await self._set_internal(key, value, ttl)
 
     async def _set_internal(self, key: str, value: T, ttl: int | None = None) -> None:
@@ -146,194 +164,73 @@ class TTLCache(Generic[T]):
             key=lambda k: self._cache[k].created_at,
         )
         evict_count = max(1, len(sorted_keys) // 10)
-        for key in sorted_keys[:evict_count]:
+        evicted_keys = sorted_keys[:evict_count]
+        for key in evicted_keys:
             del self._cache[key]
+
+        # Clean up per-key locks for evicted keys
+        async with self._locks_lock:
+            for key in evicted_keys:
+                self._key_locks.pop(key, None)
 
     async def delete(self, key: str) -> bool:
         """Delete a key from cache.
 
         Returns True if key existed.
         """
-        async with self._lock:
+        async with self._cache_lock:
             if key in self._cache:
                 del self._cache[key]
+                # Clean up per-key lock
+                async with self._locks_lock:
+                    self._key_locks.pop(key, None)
                 return True
             return False
 
+    async def delete_prefix(self, prefix: str) -> int:
+        """Delete all entries with given prefix.
+
+        Returns number of entries deleted.
+        """
+        async with self._cache_lock:
+            keys_to_delete = [
+                key for key in self._cache.keys()
+                if key.startswith(prefix)
+            ]
+            for key in keys_to_delete:
+                del self._cache[key]
+            # Clean up per-key locks
+            async with self._locks_lock:
+                for key in keys_to_delete:
+                    self._key_locks.pop(key, None)
+            return len(keys_to_delete)
+
     async def clear(self) -> None:
         """Clear all entries."""
-        async with self._lock:
+        async with self._cache_lock:
             self._cache.clear()
+            async with self._locks_lock:
+                self._key_locks.clear()
 
     async def cleanup_expired(self) -> int:
         """Remove all expired entries.
 
         Returns number of entries removed.
         """
-        async with self._lock:
+        async with self._cache_lock:
             expired_keys = [
                 key for key, entry in self._cache.items()
                 if entry.is_expired
             ]
             for key in expired_keys:
                 del self._cache[key]
+            # Clean up per-key locks for expired keys
+            async with self._locks_lock:
+                for key in expired_keys:
+                    self._key_locks.pop(key, None)
             return len(expired_keys)
 
     @property
     def size(self) -> int:
         """Get current cache size."""
         return len(self._cache)
-
-
-class SingleFlight:
-    """Deduplicates concurrent calls to the same function with the same key.
-
-    Prevents cache stampedes by ensuring only one call per key is in-flight
-    at a time. Other callers wait for the result of the first call.
-
-    Example:
-        sf = SingleFlight()
-
-        async def expensive_fetch(key: str) -> dict:
-            return await sf.do(key, lambda: fetch_from_api(key))
-    """
-
-    def __init__(self) -> None:
-        """Initialize single-flight handler."""
-        self._in_flight: dict[str, asyncio.Future[Any]] = {}
-        self._lock = asyncio.Lock()
-
-    async def do(
-        self,
-        key: str,
-        func: Callable[[], Awaitable[T]],
-    ) -> T:
-        """Execute function, deduplicating concurrent calls.
-
-        If another call with the same key is in progress, waits for
-        that result instead of executing again.
-
-        Args:
-            key: Unique key for this operation
-            func: Async function to execute
-
-        Returns:
-            Result from func (may be from another caller)
-        """
-        async with self._lock:
-            if key in self._in_flight:
-                # Another call in progress - wait for it
-                future = self._in_flight[key]
-            else:
-                # First caller - create future and execute
-                future = asyncio.get_event_loop().create_future()
-                self._in_flight[key] = future
-
-                # Execute in background, don't hold lock
-                asyncio.create_task(self._execute(key, func, future))
-
-        # Wait for result (outside lock)
-        return await future
-
-    async def _execute(
-        self,
-        key: str,
-        func: Callable[[], Awaitable[T]],
-        future: asyncio.Future[T],
-    ) -> None:
-        """Execute function and set result on future."""
-        try:
-            result = await func()
-            future.set_result(result)
-        except Exception as e:
-            future.set_exception(e)
-        finally:
-            async with self._lock:
-                self._in_flight.pop(key, None)
-
-
-class CachedLoader(Generic[T]):
-    """Combines caching with single-flight loading.
-
-    Provides a simple interface for loading and caching resources
-    with automatic deduplication and TTL expiration.
-
-    Example:
-        loader = CachedLoader(ttl_seconds=300)
-
-        async def get_config(tenant_id: str) -> Config:
-            return await loader.load(
-                f"config:{tenant_id}",
-                lambda: fetch_config(tenant_id)
-            )
-    """
-
-    def __init__(
-        self,
-        ttl_seconds: int = 300,
-        max_size: int = 1000,
-    ) -> None:
-        """Initialize cached loader.
-
-        Args:
-            ttl_seconds: Cache TTL in seconds
-            max_size: Maximum cache entries
-        """
-        self._cache: TTLCache[T] = TTLCache(
-            ttl_seconds=ttl_seconds,
-            max_size=max_size,
-        )
-        self._single_flight = SingleFlight()
-
-    async def load(
-        self,
-        key: str,
-        loader: Callable[[], Awaitable[T]],
-    ) -> T:
-        """Load a resource, using cache and single-flight.
-
-        Args:
-            key: Cache key
-            loader: Function to load if not cached
-
-        Returns:
-            Cached or newly loaded value
-        """
-        # Check cache first
-        cached = await self._cache.get(key)
-        if cached is not None:
-            return cached
-
-        # Use single-flight to load
-        async def load_and_cache() -> T:
-            value = await loader()
-            await self._cache.set(key, value)
-            return value
-
-        return await self._single_flight.do(key, load_and_cache)
-
-    async def invalidate(self, key: str) -> bool:
-        """Invalidate a cached entry.
-
-        Returns True if entry existed.
-        """
-        return await self._cache.delete(key)
-
-    async def invalidate_prefix(self, prefix: str) -> int:
-        """Invalidate all entries with given prefix.
-
-        Returns number of entries invalidated.
-        """
-        count = 0
-        keys_to_delete = [
-            key for key in self._cache._cache.keys()
-            if key.startswith(prefix)
-        ]
-        for key in keys_to_delete:
-            if await self._cache.delete(key):
-                count += 1
-        return count
-
-    async def clear(self) -> None:
-        """Clear all cached entries."""
-        await self._cache.clear()

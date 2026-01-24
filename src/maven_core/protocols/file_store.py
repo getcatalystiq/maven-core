@@ -3,7 +3,7 @@
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 
 @dataclass(frozen=True)
@@ -17,6 +17,7 @@ class FileMetadata:
     last_modified: datetime
 
 
+@runtime_checkable
 class FileStore(Protocol):
     """Protocol for file storage backends (R2, S3, filesystem)."""
 

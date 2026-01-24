@@ -90,6 +90,7 @@ class TenantMiddleware(BaseHTTPMiddleware):
     """Middleware for multi-tenant isolation.
 
     Extracts tenant ID from request and validates access.
+    Ensures the authenticated user belongs to the requested tenant.
     """
 
     def __init__(
@@ -97,6 +98,7 @@ class TenantMiddleware(BaseHTTPMiddleware):
         app: Any,
         header_name: str = "X-Tenant-ID",
         query_param: str = "tenant_id",
+        enforce_tenant_match: bool = True,
     ) -> None:
         """Initialize tenant middleware.
 
@@ -104,24 +106,29 @@ class TenantMiddleware(BaseHTTPMiddleware):
             app: The ASGI application
             header_name: Header to extract tenant ID from
             query_param: Query param to extract tenant ID from
+            enforce_tenant_match: Whether to enforce tenant ID matches user's tenant
         """
         super().__init__(app)
         self.header_name = header_name
         self.query_param = query_param
+        self.enforce_tenant_match = enforce_tenant_match
 
     async def dispatch(
         self,
         request: Request,
         call_next: Callable[[Request], Any],
     ) -> Response:
-        """Process the request and extract tenant ID.
+        """Process the request and extract/validate tenant ID.
+
+        Validates that the requested tenant ID matches the authenticated
+        user's tenant from their JWT claims.
 
         Args:
             request: The incoming request
             call_next: Next middleware/handler in chain
 
         Returns:
-            Response from handler or 400 error
+            Response from handler, 400 for missing tenant, or 403 for mismatch
         """
         # Try to get tenant ID from header, then query param
         tenant_id = request.headers.get(self.header_name)
@@ -133,6 +140,17 @@ class TenantMiddleware(BaseHTTPMiddleware):
                 {"error": f"Missing required header {self.header_name} or query param {self.query_param}"},
                 status_code=400,
             )
+
+        # Validate tenant ID matches authenticated user's tenant
+        if self.enforce_tenant_match:
+            user = getattr(request.state, "user", None)
+            if user:
+                user_tenant_id = user.get("tenant_id")
+                if user_tenant_id and user_tenant_id != tenant_id:
+                    return JSONResponse(
+                        {"error": "Not authorized to access this tenant"},
+                        status_code=403,
+                    )
 
         # Add tenant to request state
         request.state.tenant_id = tenant_id

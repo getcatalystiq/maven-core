@@ -1,8 +1,9 @@
 """HTTP route handlers with SSE streaming support."""
 
+import functools
 import json
 import time
-from typing import TYPE_CHECKING, AsyncIterator
+from typing import TYPE_CHECKING, AsyncIterator, Callable, Awaitable
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
@@ -10,6 +11,26 @@ from starlette.routing import Route
 
 if TYPE_CHECKING:
     from maven_core.agent import Agent
+
+
+def require_admin(handler: Callable[[Request], Awaitable[Response]]) -> Callable[[Request], Awaitable[Response]]:
+    """Decorator to require admin role for a route handler.
+
+    Checks authentication first (401), then authorization (403).
+    """
+    @functools.wraps(handler)
+    async def wrapper(request: Request) -> Response:
+        # Check authentication first (fail closed)
+        authenticated_user_id = getattr(request.state, "user_id", None)
+        if not authenticated_user_id:
+            return JSONResponse({"error": "Authentication required"}, status_code=401)
+
+        # Then check authorization
+        roles = getattr(request.state, "roles", [])
+        if "admin" not in roles:
+            return JSONResponse({"error": "Admin access required"}, status_code=403)
+        return await handler(request)
+    return wrapper
 
 
 class SSEResponse(StreamingResponse):
@@ -200,12 +221,29 @@ def create_routes(agent: "Agent") -> list[Route]:
         - user_id: Required - user to list sessions for
         - limit: Maximum sessions to return (default 50)
         - offset: Number to skip (default 0)
+
+        Authorization:
+        - User must be authenticated and can only list their own sessions
         """
         user_id = request.query_params.get("user_id")
         if not user_id:
             return JSONResponse(
                 {"error": "Missing required query param: user_id"},
                 status_code=400,
+            )
+
+        # Authorization check: verify authenticated user matches requested user_id
+        # Fail closed: require authentication and matching user
+        authenticated_user_id = getattr(request.state, "user_id", None)
+        if not authenticated_user_id:
+            return JSONResponse(
+                {"error": "Authentication required"},
+                status_code=401,
+            )
+        if authenticated_user_id != user_id:
+            return JSONResponse(
+                {"error": "Not authorized to access sessions for this user"},
+                status_code=403,
             )
 
         limit = int(request.query_params.get("limit", "50"))
@@ -228,6 +266,9 @@ def create_routes(agent: "Agent") -> list[Route]:
 
         Query params:
         - user_id: Required - user ID for authorization
+
+        Authorization:
+        - User must be authenticated and own the requested session
         """
         session_id = request.path_params["session_id"]
         user_id = request.query_params.get("user_id")
@@ -238,7 +279,22 @@ def create_routes(agent: "Agent") -> list[Route]:
                 status_code=400,
             )
 
-        # TODO: Integrate with SessionManager
+        # Authorization check: verify authenticated user matches requested user_id
+        # Fail closed: require authentication and matching user
+        authenticated_user_id = getattr(request.state, "user_id", None)
+        if not authenticated_user_id:
+            return JSONResponse(
+                {"error": "Authentication required"},
+                status_code=401,
+            )
+        if authenticated_user_id != user_id:
+            return JSONResponse(
+                {"error": "Not authorized to access this session"},
+                status_code=403,
+            )
+
+        # TODO: Integrate with SessionManager and verify session ownership
+        # For now, return empty response
         return JSONResponse({
             "session_id": session_id,
             "user_id": user_id,
@@ -317,10 +373,229 @@ def create_routes(agent: "Agent") -> list[Route]:
             "message": "OAuth flow completed",
         })
 
+    # Auth endpoints
+    async def auth_login(request: Request) -> Response:
+        """Login endpoint.
+
+        Body:
+        - email: User email
+        - password: User password
+
+        Returns JWT tokens on success.
+        """
+        try:
+            body = await request.json()
+        except json.JSONDecodeError:
+            return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+        email = body.get("email")
+        password = body.get("password")
+
+        if not email or not password:
+            return JSONResponse(
+                {"error": "Missing required fields: email, password"},
+                status_code=400,
+            )
+
+        # TODO: Integrate with AuthManager.authenticate
+        return JSONResponse(
+            {"error": "Authentication not implemented. Configure an auth provider."},
+            status_code=501,
+        )
+
+    async def auth_refresh(request: Request) -> Response:
+        """Refresh access token.
+
+        Body:
+        - refresh_token: Valid refresh token
+        """
+        try:
+            body = await request.json()
+        except json.JSONDecodeError:
+            return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+        refresh_token = body.get("refresh_token")
+        if not refresh_token:
+            return JSONResponse(
+                {"error": "Missing required field: refresh_token"},
+                status_code=400,
+            )
+
+        # TODO: Integrate with AuthManager.refresh_token
+        return JSONResponse(
+            {"error": "Token refresh not implemented. Configure an auth provider."},
+            status_code=501,
+        )
+
+    async def auth_logout(request: Request) -> Response:
+        """Logout and invalidate tokens."""
+        # TODO: Integrate with AuthManager.revoke_token
+        return JSONResponse({"success": True})
+
+    async def auth_me(request: Request) -> Response:
+        """Get current authenticated user info."""
+        user = getattr(request.state, "user", None)
+        if not user:
+            return JSONResponse({"error": "Not authenticated"}, status_code=401)
+
+        return JSONResponse({
+            "user_id": user.get("user_id") or user.get("sub"),
+            "email": user.get("email"),
+            "roles": user.get("roles", []),
+            "tenant_id": user.get("tenant_id"),
+        })
+
+    # Admin endpoints
+    @require_admin
+    async def admin_users_list(request: Request) -> Response:
+        """List users (admin only).
+
+        Query params:
+        - limit: Max users to return (default 50)
+        - offset: Number to skip (default 0)
+        """
+        limit = int(request.query_params.get("limit", "50"))
+        offset = int(request.query_params.get("offset", "0"))
+
+        # TODO: Integrate with UserManager
+        return JSONResponse({
+            "users": [],
+            "limit": limit,
+            "offset": offset,
+            "total": 0,
+        })
+
+    @require_admin
+    async def admin_user_create(request: Request) -> Response:
+        """Create a new user (admin only)."""
+        try:
+            body = await request.json()
+        except json.JSONDecodeError:
+            return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+        email = body.get("email")
+        if not email:
+            return JSONResponse({"error": "Missing required field: email"}, status_code=400)
+
+        # TODO: Integrate with UserManager.create_user
+        return JSONResponse({
+            "user_id": "placeholder-user-id",
+            "email": email,
+            "created": True,
+        }, status_code=201)
+
+    @require_admin
+    async def admin_user_detail(request: Request) -> Response:
+        """Get user details (admin only)."""
+        user_id = request.path_params["user_id"]
+
+        # TODO: Integrate with UserManager.get_user
+        return JSONResponse({
+            "user_id": user_id,
+            "email": "placeholder@example.com",
+            "roles": [],
+            "created_at": time.time(),
+        })
+
+    @require_admin
+    async def admin_user_update(request: Request) -> Response:
+        """Update user (admin only)."""
+        user_id = request.path_params["user_id"]
+
+        try:
+            body = await request.json()
+        except json.JSONDecodeError:
+            return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+        # TODO: Integrate with UserManager.update_user
+        return JSONResponse({
+            "user_id": user_id,
+            "updated": True,
+        })
+
+    @require_admin
+    async def admin_user_delete(request: Request) -> Response:
+        """Delete user (admin only)."""
+        user_id = request.path_params["user_id"]
+
+        # TODO: Integrate with UserManager.delete_user
+        return JSONResponse({
+            "user_id": user_id,
+            "deleted": True,
+        })
+
+    # Tenant endpoints
+    async def tenant_info(request: Request) -> Response:
+        """Get current tenant info."""
+        tenant_id = getattr(request.state, "tenant_id", None)
+        if not tenant_id:
+            return JSONResponse({"error": "No tenant context"}, status_code=400)
+
+        # TODO: Integrate with TenantManager
+        return JSONResponse({
+            "tenant_id": tenant_id,
+            "name": "Placeholder Tenant",
+            "settings": {},
+        })
+
+    @require_admin
+    async def tenant_update(request: Request) -> Response:
+        """Update tenant settings (admin only)."""
+        tenant_id = getattr(request.state, "tenant_id", None)
+        if not tenant_id:
+            return JSONResponse({"error": "No tenant context"}, status_code=400)
+
+        try:
+            body = await request.json()
+        except json.JSONDecodeError:
+            return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+        # TODO: Integrate with TenantManager.update
+        return JSONResponse({
+            "tenant_id": tenant_id,
+            "updated": True,
+        })
+
+    async def tenant_config(request: Request) -> Response:
+        """Get tenant configuration."""
+        tenant_id = getattr(request.state, "tenant_id", None)
+        if not tenant_id:
+            return JSONResponse({"error": "No tenant context"}, status_code=400)
+
+        # TODO: Integrate with ConfigLoader
+        return JSONResponse({
+            "tenant_id": tenant_id,
+            "config": {},
+        })
+
+    @require_admin
+    async def tenant_config_update(request: Request) -> Response:
+        """Update tenant configuration (admin only)."""
+        tenant_id = getattr(request.state, "tenant_id", None)
+        if not tenant_id:
+            return JSONResponse({"error": "No tenant context"}, status_code=400)
+
+        try:
+            body = await request.json()
+        except json.JSONDecodeError:
+            return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+        # TODO: Integrate with ConfigLoader.save
+        return JSONResponse({
+            "tenant_id": tenant_id,
+            "config_updated": True,
+        })
+
     return [
         # Health
         Route("/health", health, methods=["GET"]),
         Route("/ping", health, methods=["GET"]),  # Alias
+
+        # Auth
+        Route("/auth/login", auth_login, methods=["POST"]),
+        Route("/auth/refresh", auth_refresh, methods=["POST"]),
+        Route("/auth/logout", auth_logout, methods=["POST"]),
+        Route("/auth/me", auth_me, methods=["GET"]),
 
         # Chat
         Route("/chat", chat, methods=["POST"]),
@@ -338,4 +613,17 @@ def create_routes(agent: "Agent") -> list[Route]:
         Route("/connectors", connectors, methods=["GET"]),
         Route("/connectors/{connector_name}/oauth/start", oauth_start, methods=["POST"]),
         Route("/oauth/callback", oauth_callback, methods=["GET"]),
+
+        # Admin - Users
+        Route("/admin/users", admin_users_list, methods=["GET"]),
+        Route("/admin/users", admin_user_create, methods=["POST"]),
+        Route("/admin/users/{user_id}", admin_user_detail, methods=["GET"]),
+        Route("/admin/users/{user_id}", admin_user_update, methods=["PUT"]),
+        Route("/admin/users/{user_id}", admin_user_delete, methods=["DELETE"]),
+
+        # Tenant
+        Route("/tenant", tenant_info, methods=["GET"]),
+        Route("/tenant", tenant_update, methods=["PUT"]),
+        Route("/tenant/config", tenant_config, methods=["GET"]),
+        Route("/tenant/config", tenant_config_update, methods=["PUT"]),
     ]

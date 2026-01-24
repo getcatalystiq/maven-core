@@ -1,5 +1,6 @@
 """Two-tier session storage: files for content, KV for metadata."""
 
+import asyncio
 import json
 import time
 from dataclasses import dataclass, field
@@ -111,6 +112,16 @@ class SessionStorage:
         self.files = files
         self.kv = kv
         self.tenant_id = tenant_id
+        # Lock for session operations to prevent race conditions
+        self._session_locks: dict[str, asyncio.Lock] = {}
+        self._locks_lock = asyncio.Lock()
+
+    async def _get_session_lock(self, session_id: str) -> asyncio.Lock:
+        """Get or create a lock for a specific session."""
+        async with self._locks_lock:
+            if session_id not in self._session_locks:
+                self._session_locks[session_id] = asyncio.Lock()
+            return self._session_locks[session_id]
 
     def _transcript_key(self, user_id: str, session_id: str) -> str:
         """Get file key for session transcript."""
@@ -242,6 +253,8 @@ class SessionStorage:
     ) -> Turn:
         """Append a turn to a session.
 
+        Uses locking to prevent race conditions during read-modify-write.
+
         Args:
             user_id: User ID
             session_id: Session ID
@@ -252,49 +265,53 @@ class SessionStorage:
         Returns:
             The created turn
         """
-        now = time.time()
-        turn = Turn(
-            id=f"turn-{uuid4().hex[:8]}",
-            role=role,
-            content=content,
-            timestamp=now,
-            metadata=metadata or {},
-        )
+        # Get session-specific lock to prevent race conditions
+        session_lock = await self._get_session_lock(session_id)
 
-        # Load existing transcript
-        result = await self.files.get(self._transcript_key(user_id, session_id))
-        if result:
-            transcript_data, _ = result
-            transcript = json.loads(transcript_data.decode())
-        else:
-            transcript = {"turns": []}
-
-        # Append turn
-        transcript["turns"].append(turn.to_dict())
-
-        # Save transcript
-        await self.files.put(
-            self._transcript_key(user_id, session_id),
-            json.dumps(transcript).encode(),
-            content_type="application/json",
-        )
-
-        # Update metadata
-        session_meta = await self.get_metadata(session_id)
-        if session_meta:
-            session_meta.updated_at = now
-            session_meta.turn_count = len(transcript["turns"])
-
-            # Auto-generate title from first user message
-            if session_meta.title is None and role == "user":
-                session_meta.title = content[:50] + ("..." if len(content) > 50 else "")
-
-            await self.kv.set(
-                self._metadata_key(session_id),
-                json.dumps(session_meta.to_dict()).encode(),
+        async with session_lock:
+            now = time.time()
+            turn = Turn(
+                id=f"turn-{uuid4().hex[:8]}",
+                role=role,
+                content=content,
+                timestamp=now,
+                metadata=metadata or {},
             )
 
-        return turn
+            # Load existing transcript (inside lock to prevent TOCTOU)
+            result = await self.files.get(self._transcript_key(user_id, session_id))
+            if result:
+                transcript_data, _ = result
+                transcript = json.loads(transcript_data.decode())
+            else:
+                transcript = {"turns": []}
+
+            # Append turn
+            transcript["turns"].append(turn.to_dict())
+
+            # Save transcript
+            await self.files.put(
+                self._transcript_key(user_id, session_id),
+                json.dumps(transcript).encode(),
+                content_type="application/json",
+            )
+
+            # Update metadata
+            session_meta = await self.get_metadata(session_id)
+            if session_meta:
+                session_meta.updated_at = now
+                session_meta.turn_count = len(transcript["turns"])
+
+                # Auto-generate title from first user message
+                if session_meta.title is None and role == "user":
+                    session_meta.title = content[:50] + ("..." if len(content) > 50 else "")
+
+                await self.kv.set(
+                    self._metadata_key(session_id),
+                    json.dumps(session_meta.to_dict()).encode(),
+                )
+
+            return turn
 
     async def list_sessions(
         self,
@@ -303,6 +320,8 @@ class SessionStorage:
         offset: int = 0,
     ) -> list[SessionMetadata]:
         """List sessions for a user.
+
+        Uses batch fetching to avoid N+1 query pattern.
 
         Args:
             user_id: User ID
@@ -322,14 +341,25 @@ class SessionStorage:
         # Apply pagination
         session_ids = session_ids[offset:offset + limit]
 
-        # Load metadata for each session
-        result = []
-        for session_id in session_ids:
-            meta = await self.get_metadata(session_id)
-            if meta:
-                result.append(meta)
+        if not session_ids:
+            return []
 
-        return result
+        # Batch fetch metadata for all sessions concurrently
+        # This avoids the N+1 query pattern by fetching in parallel
+        async def fetch_metadata(session_id: str) -> SessionMetadata | None:
+            return await self.get_metadata(session_id)
+
+        # Use asyncio.gather for parallel fetching
+        results = await asyncio.gather(
+            *[fetch_metadata(sid) for sid in session_ids],
+            return_exceptions=True,
+        )
+
+        # Filter out None results and exceptions
+        return [
+            meta for meta in results
+            if isinstance(meta, SessionMetadata)
+        ]
 
     async def delete_session(self, user_id: str, session_id: str) -> bool:
         """Delete a session.
@@ -341,26 +371,34 @@ class SessionStorage:
         Returns:
             True if deleted, False if not found
         """
-        # Verify ownership
-        meta = await self.get_metadata(session_id)
-        if not meta or meta.user_id != user_id:
-            return False
+        # Acquire lock first to prevent race conditions during deletion
+        session_lock = await self._get_session_lock(session_id)
 
-        # Delete transcript
-        await self.files.delete(self._transcript_key(user_id, session_id))
+        async with session_lock:
+            # Verify ownership (inside lock to prevent TOCTOU)
+            meta = await self.get_metadata(session_id)
+            if not meta or meta.user_id != user_id:
+                return False
 
-        # Delete metadata
-        await self.kv.delete(self._metadata_key(session_id))
+            # Delete transcript
+            await self.files.delete(self._transcript_key(user_id, session_id))
 
-        # Remove from user's session list
-        sessions_data = await self.kv.get(self._user_sessions_key(user_id))
-        if sessions_data:
-            sessions = json.loads(sessions_data.decode())
-            if session_id in sessions:
-                sessions.remove(session_id)
-                await self.kv.set(
-                    self._user_sessions_key(user_id),
-                    json.dumps(sessions).encode(),
-                )
+            # Delete metadata
+            await self.kv.delete(self._metadata_key(session_id))
+
+            # Remove from user's session list
+            sessions_data = await self.kv.get(self._user_sessions_key(user_id))
+            if sessions_data:
+                sessions = json.loads(sessions_data.decode())
+                if session_id in sessions:
+                    sessions.remove(session_id)
+                    await self.kv.set(
+                        self._user_sessions_key(user_id),
+                        json.dumps(sessions).encode(),
+                    )
+
+        # Clean up session lock to prevent memory leak (outside the lock)
+        async with self._locks_lock:
+            self._session_locks.pop(session_id, None)
 
         return True

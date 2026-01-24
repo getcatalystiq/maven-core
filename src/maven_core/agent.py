@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from maven_core.caching import CachedLoader, SingleFlight
+from maven_core.caching import TTLCache
 from maven_core.config import Config
 from maven_core.observability import (
     RequestContext,
@@ -74,8 +74,7 @@ class Agent:
         self._sandbox: SandboxBackend | None = None
         self._initialized = False
         self._init_lock = asyncio.Lock()
-        self._single_flight = SingleFlight()
-        self._cache = CachedLoader(ttl_seconds=300)
+        self._cache: TTLCache[str] = TTLCache(ttl_seconds=300)
 
     @classmethod
     def from_config(cls, path: str | Path) -> "Agent":
@@ -106,70 +105,65 @@ class Agent:
     async def _ensure_initialized(self) -> None:
         """Lazily initialize backends on first use.
 
-        Uses single-flight pattern to prevent concurrent initialization.
+        Uses lock to prevent concurrent initialization.
         """
         if self._initialized:
             return
 
-        # Use single-flight to prevent concurrent initialization
-        await self._single_flight.do("init", self._do_initialize)
-
-    async def _do_initialize(self) -> None:
-        """Perform actual initialization (called via single-flight)."""
-        if self._initialized:
-            return
-
+        # Double-checked locking pattern
         async with self._init_lock:
-            # Double-check after acquiring lock
             if self._initialized:
                 return
+            await self._do_initialize()
 
-            with Timer() as timer:
-                logger.info("Initializing agent backends")
+    async def _do_initialize(self) -> None:
+        """Perform actual initialization (called under lock)."""
+        with Timer() as timer:
+            logger.info("Initializing agent backends")
 
-                # Initialize storage backends
-                files_config = self.config.storage.files
-                self._files = create_file_store(
-                    files_config.backend,
-                    path=files_config.path,
-                    bucket=files_config.bucket,
-                    endpoint=files_config.endpoint,
-                    access_key=files_config.access_key,
-                    secret_key=files_config.secret_key,
-                )
-
-                kv_config = self.config.storage.kv
-                self._kv = create_kv_store(
-                    kv_config.backend,
-                    namespace_id=kv_config.namespace_id,
-                    api_token=kv_config.api_token,
-                    redis_url=kv_config.redis_url,
-                )
-
-                db_config = self.config.storage.database
-                self._db = create_database(
-                    db_config.backend,
-                    path=db_config.path,
-                    database_id=db_config.database_id,
-                    api_token=db_config.api_token,
-                    connection_string=db_config.connection_string,
-                )
-
-                sandbox_config = self.config.provisioning
-                self._sandbox = create_sandbox_backend(
-                    sandbox_config.backend,
-                    account_id=sandbox_config.account_id,
-                    api_token=sandbox_config.api_token,
-                    limits=sandbox_config.limits.model_dump(),
-                )
-
-                self._initialized = True
-
-            logger.info(
-                "Agent backends initialized",
-                duration_ms=timer.duration_ms,
+            # Initialize storage backends
+            files_config = self.config.storage.files
+            self._files = create_file_store(
+                files_config.backend,
+                path=files_config.path,
+                bucket=files_config.bucket,
+                endpoint=files_config.endpoint,
+                access_key=files_config.access_key,
+                secret_key=files_config.secret_key,
             )
-            emit_timer("agent.init", timer.duration_ms)
+
+            kv_config = self.config.storage.kv
+            self._kv = create_kv_store(
+                kv_config.backend,
+                namespace_id=kv_config.namespace_id,
+                api_token=kv_config.api_token,
+                redis_url=kv_config.redis_url,
+            )
+
+            db_config = self.config.storage.database
+            self._db = create_database(
+                db_config.backend,
+                path=db_config.path,
+                database_id=db_config.database_id,
+                api_token=db_config.api_token,
+                connection_string=db_config.connection_string,
+            )
+
+            sandbox_config = self.config.provisioning
+            self._sandbox = create_sandbox_backend(
+                sandbox_config.backend,
+                account_id=sandbox_config.account_id,
+                api_token=sandbox_config.api_token,
+                limits=sandbox_config.limits.model_dump(),
+            )
+
+            self._initialized = True
+
+        logger.info(
+            "Agent backends initialized",
+            duration_ms=timer.duration_ms,
+        )
+        emit_timer("agent.init", timer.duration_ms)
 
     @property
     def files(self) -> FileStore:
@@ -300,8 +294,13 @@ class Agent:
             emit_counter("agent.stream.failed")
             raise
         finally:
-            # Clean up context vars
-            pass
+            # Clean up context vars - reset to previous values
+            if request_id_var_token is not None:
+                request_id_var.reset(request_id_var_token)
+            if user_id_var_token is not None:
+                user_id_var.reset(user_id_var_token)
+            if session_id_var_token is not None:
+                session_id_var.reset(session_id_var_token)
 
     def serve(
         self,

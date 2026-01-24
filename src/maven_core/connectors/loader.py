@@ -1,5 +1,7 @@
 """Connector loading and management."""
 
+from __future__ import annotations
+
 import json
 from dataclasses import dataclass
 from typing import Any
@@ -26,6 +28,7 @@ class ConnectorLoader:
         kv: KVStore,
         tenant_id: str,
         cache_ttl: int = 300,
+        encryption_key: str | None = None,
     ) -> None:
         """Initialize connector loader.
 
@@ -34,12 +37,13 @@ class ConnectorLoader:
             kv: KV storage backend
             tenant_id: Current tenant ID
             cache_ttl: Cache TTL in seconds
+            encryption_key: Fernet key for OAuth token encryption
         """
         self.files = files
         self.kv = kv
         self.tenant_id = tenant_id
         self.cache_ttl = cache_ttl
-        self.oauth_manager = OAuthManager(kv, tenant_id)
+        self.oauth_manager = OAuthManager(kv, tenant_id, encryption_key=encryption_key)
         self._local_cache: ConnectorIndex | None = None
 
     def _connectors_prefix(self) -> str:

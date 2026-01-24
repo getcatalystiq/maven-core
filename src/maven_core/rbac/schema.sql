@@ -38,7 +38,8 @@ CREATE TABLE IF NOT EXISTS user_roles (
     role_id TEXT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(tenant_id, user_id, role_id),
-    FOREIGN KEY (role_id) REFERENCES roles(id)
+    FOREIGN KEY (role_id) REFERENCES roles(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
 -- Skill-role assignments (which roles can access which skills)
@@ -49,7 +50,7 @@ CREATE TABLE IF NOT EXISTS skill_roles (
     role_id TEXT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(tenant_id, skill_slug, role_id),
-    FOREIGN KEY (role_id) REFERENCES roles(id)
+    FOREIGN KEY (role_id) REFERENCES roles(id) ON DELETE CASCADE
 );
 
 -- Service accounts
@@ -79,7 +80,8 @@ CREATE TABLE IF NOT EXISTS oauth_tokens (
     version INTEGER DEFAULT 1,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP,
-    UNIQUE(tenant_id, user_id, connector_slug)
+    UNIQUE(tenant_id, user_id, connector_slug),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
 -- Indexes for common queries

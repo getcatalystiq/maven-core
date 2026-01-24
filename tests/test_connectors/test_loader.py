@@ -24,7 +24,9 @@ def kv_store() -> MemoryKVStore:
 @pytest.fixture
 def loader(file_store, kv_store) -> ConnectorLoader:
     """Create a connector loader."""
-    return ConnectorLoader(file_store, kv_store, "test-tenant")
+    # Use a fixed Fernet key for testing
+    test_key = "x7yMr-3qzKLNT9WvIjK6VxNm4KmJQxhPr5y8kQUhF3k="
+    return ConnectorLoader(file_store, kv_store, "test-tenant", encryption_key=test_key)
 
 
 class TestConnectorManagement:

@@ -1,10 +1,9 @@
-"""Rate limiting interfaces and implementations.
+"""Rate limiting with sliding window algorithm.
 
-Provides extensible rate limiting with multiple algorithms and backends.
+Provides simple, accurate rate limiting with optional tiered limits.
 """
 
 import time
-from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol
@@ -69,27 +68,35 @@ class SlidingWindowRateLimiter:
         self,
         limit: int,
         window_seconds: int = 60,
+        max_keys: int = 10000,
     ) -> None:
         """Initialize rate limiter.
 
         Args:
             limit: Maximum requests per window
             window_seconds: Window size in seconds
+            max_keys: Maximum number of keys to track (for memory bounds)
         """
         self.limit = limit
         self.window_seconds = window_seconds
+        self.max_keys = max_keys
         self._requests: dict[str, list[float]] = {}
+        self._last_cleanup = time.time()
 
     async def check(self, key: str) -> RateLimitInfo:
         """Check if request is allowed under rate limit."""
         now = time.time()
         window_start = now - self.window_seconds
 
+        # Periodic cleanup of expired keys to prevent unbounded memory growth
+        if now - self._last_cleanup > self.window_seconds:
+            await self._cleanup_expired_keys()
+
         # Get requests in current window
         if key not in self._requests:
             self._requests[key] = []
 
-        # Clean old requests
+        # Clean old requests for this key
         self._requests[key] = [
             t for t in self._requests[key]
             if t > window_start
@@ -126,157 +133,39 @@ class SlidingWindowRateLimiter:
             reset_at=reset_at,
         )
 
+    async def _cleanup_expired_keys(self) -> None:
+        """Remove keys with no recent requests to bound memory usage."""
+        now = time.time()
+        window_start = now - self.window_seconds
+        self._last_cleanup = now
+
+        # Find keys with no requests in current window
+        expired_keys = [
+            key for key, requests in self._requests.items()
+            if not requests or max(requests) < window_start
+        ]
+
+        # Remove expired keys
+        for key in expired_keys:
+            del self._requests[key]
+
+        # If still over max_keys, evict oldest keys
+        if len(self._requests) > self.max_keys:
+            # Sort by most recent request, keep most active
+            sorted_keys = sorted(
+                self._requests.keys(),
+                key=lambda k: max(self._requests[k]) if self._requests[k] else 0,
+            )
+            for key in sorted_keys[:len(sorted_keys) - self.max_keys]:
+                del self._requests[key]
+
     async def reset(self, key: str) -> None:
         """Reset rate limit for a key."""
         self._requests.pop(key, None)
 
 
-class TokenBucketRateLimiter:
-    """Token bucket rate limiter.
-
-    Allows bursts up to the bucket size while maintaining
-    a steady rate of requests over time.
-
-    Example:
-        limiter = TokenBucketRateLimiter(
-            rate=10,  # 10 tokens per second
-            burst=50,  # Allow bursts up to 50
-        )
-    """
-
-    def __init__(
-        self,
-        rate: float,
-        burst: int,
-    ) -> None:
-        """Initialize token bucket.
-
-        Args:
-            rate: Tokens added per second
-            burst: Maximum bucket capacity
-        """
-        self.rate = rate
-        self.burst = burst
-        self._buckets: dict[str, tuple[float, float]] = {}  # (tokens, last_update)
-
-    async def check(self, key: str) -> RateLimitInfo:
-        """Check if request is allowed, consuming a token."""
-        now = time.time()
-
-        # Get or create bucket
-        if key in self._buckets:
-            tokens, last_update = self._buckets[key]
-            # Add tokens based on elapsed time
-            elapsed = now - last_update
-            tokens = min(self.burst, tokens + elapsed * self.rate)
-        else:
-            tokens = float(self.burst)
-            last_update = now
-
-        if tokens < 1:
-            # Not enough tokens
-            wait_time = (1 - tokens) / self.rate
-            return RateLimitInfo(
-                result=RateLimitResult.DENIED,
-                limit=self.burst,
-                remaining=0,
-                reset_at=now + wait_time,
-                retry_after=wait_time,
-            )
-
-        # Consume token
-        tokens -= 1
-        self._buckets[key] = (tokens, now)
-
-        return RateLimitInfo(
-            result=RateLimitResult.ALLOWED,
-            limit=self.burst,
-            remaining=int(tokens),
-            reset_at=now + (self.burst - tokens) / self.rate,
-        )
-
-    async def reset(self, key: str) -> None:
-        """Reset bucket to full capacity."""
-        self._buckets[key] = (float(self.burst), time.time())
-
-
-class FixedWindowRateLimiter:
-    """Fixed window rate limiter.
-
-    Simple and efficient but may allow up to 2x the limit
-    at window boundaries.
-
-    Example:
-        limiter = FixedWindowRateLimiter(limit=100, window_seconds=60)
-    """
-
-    def __init__(
-        self,
-        limit: int,
-        window_seconds: int = 60,
-    ) -> None:
-        """Initialize rate limiter.
-
-        Args:
-            limit: Maximum requests per window
-            window_seconds: Window size in seconds
-        """
-        self.limit = limit
-        self.window_seconds = window_seconds
-        self._counters: dict[str, tuple[int, int]] = {}  # (count, window_start)
-
-    def _get_window(self, now: float) -> int:
-        """Get current window ID."""
-        return int(now // self.window_seconds)
-
-    async def check(self, key: str) -> RateLimitInfo:
-        """Check if request is allowed under rate limit."""
-        now = time.time()
-        current_window = self._get_window(now)
-        window_start = current_window * self.window_seconds
-        reset_at = window_start + self.window_seconds
-
-        # Get or create counter for current window
-        if key in self._counters:
-            count, counter_window = self._counters[key]
-            if counter_window != current_window:
-                # New window, reset counter
-                count = 0
-        else:
-            count = 0
-
-        remaining = max(0, self.limit - count)
-
-        if count >= self.limit:
-            # Rate limited
-            return RateLimitInfo(
-                result=RateLimitResult.DENIED,
-                limit=self.limit,
-                remaining=0,
-                reset_at=reset_at,
-                retry_after=reset_at - now,
-            )
-
-        # Allowed - increment counter
-        self._counters[key] = (count + 1, current_window)
-
-        return RateLimitInfo(
-            result=RateLimitResult.ALLOWED,
-            limit=self.limit,
-            remaining=remaining - 1,
-            reset_at=reset_at,
-        )
-
-    async def reset(self, key: str) -> None:
-        """Reset rate limit for a key."""
-        self._counters.pop(key, None)
-
-
 class CompositeRateLimiter:
-    """Combines multiple rate limiters.
-
-    Useful for implementing tiered rate limits (e.g., per-second
-    and per-day limits).
+    """Combines multiple rate limiters for tiered limits.
 
     Example:
         limiter = CompositeRateLimiter([
@@ -324,50 +213,5 @@ class CompositeRateLimiter:
             await limiter.reset(key)
 
 
-class RateLimiterFactory:
-    """Factory for creating rate limiters from configuration.
-
-    Example:
-        factory = RateLimiterFactory()
-        limiter = factory.create({
-            "algorithm": "sliding_window",
-            "limit": 100,
-            "window_seconds": 60,
-        })
-    """
-
-    _algorithms = {
-        "sliding_window": SlidingWindowRateLimiter,
-        "token_bucket": TokenBucketRateLimiter,
-        "fixed_window": FixedWindowRateLimiter,
-    }
-
-    @classmethod
-    def create(cls, config: dict) -> RateLimiter:
-        """Create rate limiter from config.
-
-        Args:
-            config: Rate limiter configuration with "algorithm" key
-
-        Returns:
-            Configured rate limiter instance
-        """
-        algorithm = config.get("algorithm", "sliding_window")
-        limiter_class = cls._algorithms.get(algorithm)
-
-        if limiter_class is None:
-            raise ValueError(f"Unknown rate limit algorithm: {algorithm}")
-
-        # Extract kwargs for the limiter
-        kwargs = {k: v for k, v in config.items() if k != "algorithm"}
-        return limiter_class(**kwargs)
-
-    @classmethod
-    def register(cls, name: str, limiter_class: type) -> None:
-        """Register a custom rate limiter algorithm.
-
-        Args:
-            name: Algorithm name
-            limiter_class: Rate limiter class
-        """
-        cls._algorithms[name] = limiter_class
+# Convenience alias (use different name to avoid shadowing Protocol)
+DefaultRateLimiter = SlidingWindowRateLimiter

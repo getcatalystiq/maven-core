@@ -259,24 +259,24 @@ class RequestContext:
         self.tenant_id = tenant_id
         self.user_id = user_id
         self.session_id = session_id
-        self._tokens: list[Any] = []
+        # Store (var, token) tuples so we can reset properly
+        self._tokens: list[tuple[ContextVar, Any]] = []
 
     def __enter__(self) -> "RequestContext":
         """Set context variables."""
-        self._tokens.append(request_id_var.set(self.request_id))
+        self._tokens.append((request_id_var, request_id_var.set(self.request_id)))
         if self.tenant_id:
-            self._tokens.append(tenant_id_var.set(self.tenant_id))
+            self._tokens.append((tenant_id_var, tenant_id_var.set(self.tenant_id)))
         if self.user_id:
-            self._tokens.append(user_id_var.set(self.user_id))
+            self._tokens.append((user_id_var, user_id_var.set(self.user_id)))
         if self.session_id:
-            self._tokens.append(session_id_var.set(self.session_id))
+            self._tokens.append((session_id_var, session_id_var.set(self.session_id)))
         return self
 
     def __exit__(self, *args: Any) -> None:
-        """Reset context variables."""
-        for token in self._tokens:
-            # ContextVar tokens can be reset
-            pass  # Context vars auto-reset on scope exit
+        """Reset context variables to their previous values."""
+        for var, token in self._tokens:
+            var.reset(token)
 
     async def __aenter__(self) -> "RequestContext":
         """Async context manager entry."""

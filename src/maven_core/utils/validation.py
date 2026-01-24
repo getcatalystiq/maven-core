@@ -73,13 +73,21 @@ def validate_password(
     password: str,
     min_length: int = 12,
     require_special: bool = True,
+    require_uppercase: bool = True,
+    require_lowercase: bool = True,
+    require_digit: bool = True,
 ) -> str:
     """Validate a password meets security requirements.
+
+    Enforces password complexity requirements following OWASP guidelines.
 
     Args:
         password: The password to validate
         min_length: Minimum required length
         require_special: Whether to require special characters
+        require_uppercase: Whether to require uppercase letters
+        require_lowercase: Whether to require lowercase letters
+        require_digit: Whether to require digits
 
     Returns:
         The password (unchanged)
@@ -93,8 +101,17 @@ def validate_password(
     if len(password) < min_length:
         raise ValueError(f"Password must be at least {min_length} characters")
 
+    if require_uppercase and not re.search(r"[A-Z]", password):
+        raise ValueError("Password must contain at least one uppercase letter")
+
+    if require_lowercase and not re.search(r"[a-z]", password):
+        raise ValueError("Password must contain at least one lowercase letter")
+
+    if require_digit and not re.search(r"[0-9]", password):
+        raise ValueError("Password must contain at least one digit")
+
     if require_special:
-        if not re.search(r"[!@#$%^&*(),.?\":{}|<>]", password):
+        if not re.search(r"[!@#$%^&*(),.?\":{}|<>\-_=+\[\];'\\`~]", password):
             raise ValueError("Password must contain at least one special character")
 
     return password

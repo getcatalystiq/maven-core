@@ -182,23 +182,13 @@ class TestSessionsEndpoint:
         assert response.status_code == 400
         assert "user_id" in response.json()["error"].lower()
 
-    def test_sessions_returns_list(self, client: TestClient) -> None:
-        """Sessions returns a list."""
+    def test_sessions_requires_authentication(self, client: TestClient) -> None:
+        """Sessions requires authentication."""
         response = client.get("/sessions?user_id=user-123")
 
-        assert response.status_code == 200
-        data = response.json()
-        assert "sessions" in data
-        assert isinstance(data["sessions"], list)
-
-    def test_sessions_pagination(self, client: TestClient) -> None:
-        """Sessions accepts pagination params."""
-        response = client.get("/sessions?user_id=user-123&limit=10&offset=5")
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data["limit"] == 10
-        assert data["offset"] == 5
+        # Fail closed: unauthenticated requests return 401
+        assert response.status_code == 401
+        assert "authentication" in response.json()["error"].lower()
 
 
 class TestSessionDetailEndpoint:
@@ -210,14 +200,13 @@ class TestSessionDetailEndpoint:
 
         assert response.status_code == 400
 
-    def test_session_detail_returns_session(self, client: TestClient) -> None:
-        """Session detail returns session info."""
+    def test_session_detail_requires_authentication(self, client: TestClient) -> None:
+        """Session detail requires authentication."""
         response = client.get("/sessions/session-123?user_id=user-123")
 
-        assert response.status_code == 200
-        data = response.json()
-        assert data["session_id"] == "session-123"
-        assert data["user_id"] == "user-123"
+        # Fail closed: unauthenticated requests return 401
+        assert response.status_code == 401
+        assert "authentication" in response.json()["error"].lower()
 
 
 class TestConnectorsEndpoint:

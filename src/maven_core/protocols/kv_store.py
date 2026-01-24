@@ -1,8 +1,9 @@
 """KVStore protocol for key-value storage backends."""
 
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 
+@runtime_checkable
 class KVStore(Protocol):
     """Protocol for key-value storage backends (KV, Redis, DynamoDB)."""
 

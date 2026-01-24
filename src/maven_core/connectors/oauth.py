@@ -2,6 +2,7 @@
 
 import base64
 import hashlib
+import os
 import secrets
 import time
 from dataclasses import dataclass
@@ -11,6 +12,7 @@ import httpx
 
 from maven_core.protocols import KVStore
 from maven_core.protocols.connector import ConnectorCredentials
+from maven_core.utils.crypto import TokenEncryption
 
 
 @dataclass
@@ -45,6 +47,7 @@ class OAuthManager:
         kv: KVStore,
         tenant_id: str,
         state_ttl: int = 600,  # 10 minutes
+        encryption_key: str | None = None,
     ) -> None:
         """Initialize OAuth manager.
 
@@ -52,10 +55,21 @@ class OAuthManager:
             kv: KV store for state and tokens
             tenant_id: Current tenant ID
             state_ttl: TTL for OAuth state (seconds)
+            encryption_key: Fernet-compatible key for token encryption.
+                           If not provided, uses OAUTH_ENCRYPTION_KEY env var.
         """
         self.kv = kv
         self.tenant_id = tenant_id
         self.state_ttl = state_ttl
+
+        # Initialize token encryption
+        key = encryption_key or os.environ.get("OAUTH_ENCRYPTION_KEY")
+        if not key:
+            raise ValueError(
+                "OAuth encryption key required. Set OAUTH_ENCRYPTION_KEY env var "
+                "or pass encryption_key parameter."
+            )
+        self._encryption = TokenEncryption(key)
 
     def _state_key(self, state: str) -> str:
         """Get KV key for OAuth state."""
@@ -323,7 +337,10 @@ class OAuthManager:
         return updated
 
     async def store_credentials(self, credentials: ConnectorCredentials) -> None:
-        """Store credentials in KV.
+        """Store credentials in KV with encryption.
+
+        Sensitive tokens (access_token, refresh_token, api_key) are encrypted
+        before storage to protect against unauthorized access.
 
         Args:
             credentials: Credentials to store
@@ -331,15 +348,29 @@ class OAuthManager:
         import json
 
         key = self._token_key(credentials.user_id, credentials.connector_name)
+
+        # Encrypt sensitive tokens before storage
+        encrypted_access_token = None
+        encrypted_refresh_token = None
+        encrypted_api_key = None
+
+        if credentials.access_token:
+            encrypted_access_token = self._encryption.encrypt(credentials.access_token)
+        if credentials.refresh_token:
+            encrypted_refresh_token = self._encryption.encrypt(credentials.refresh_token)
+        if credentials.api_key:
+            encrypted_api_key = self._encryption.encrypt(credentials.api_key)
+
         data = json.dumps({
             "connector_name": credentials.connector_name,
             "user_id": credentials.user_id,
             "credential_type": credentials.credential_type,
-            "access_token": credentials.access_token,
-            "refresh_token": credentials.refresh_token,
+            "access_token_encrypted": encrypted_access_token,
+            "refresh_token_encrypted": encrypted_refresh_token,
             "expires_at": credentials.expires_at,
-            "api_key": credentials.api_key,
+            "api_key_encrypted": encrypted_api_key,
             "metadata": credentials.metadata,
+            "_encrypted": True,  # Version marker for migration
         }).encode()
 
         await self.kv.set(key, data)
@@ -349,7 +380,9 @@ class OAuthManager:
         user_id: str,
         connector_name: str,
     ) -> ConnectorCredentials | None:
-        """Get stored credentials.
+        """Get stored credentials with decryption.
+
+        Decrypts sensitive tokens that were encrypted during storage.
 
         Args:
             user_id: User ID
@@ -368,14 +401,34 @@ class OAuthManager:
 
         try:
             parsed = json.loads(data.decode())
+
+            # Check if data is encrypted (new format)
+            if parsed.get("_encrypted"):
+                # Decrypt sensitive tokens
+                access_token = None
+                refresh_token = None
+                api_key = None
+
+                if parsed.get("access_token_encrypted"):
+                    access_token = self._encryption.decrypt(parsed["access_token_encrypted"])
+                if parsed.get("refresh_token_encrypted"):
+                    refresh_token = self._encryption.decrypt(parsed["refresh_token_encrypted"])
+                if parsed.get("api_key_encrypted"):
+                    api_key = self._encryption.decrypt(parsed["api_key_encrypted"])
+            else:
+                # Legacy unencrypted format - migrate on next write
+                access_token = parsed.get("access_token")
+                refresh_token = parsed.get("refresh_token")
+                api_key = parsed.get("api_key")
+
             return ConnectorCredentials(
                 connector_name=parsed["connector_name"],
                 user_id=parsed["user_id"],
                 credential_type=parsed["credential_type"],
-                access_token=parsed.get("access_token"),
-                refresh_token=parsed.get("refresh_token"),
+                access_token=access_token,
+                refresh_token=refresh_token,
                 expires_at=parsed.get("expires_at"),
-                api_key=parsed.get("api_key"),
+                api_key=api_key,
                 metadata=parsed.get("metadata", {}),
             )
         except (json.JSONDecodeError, KeyError):
