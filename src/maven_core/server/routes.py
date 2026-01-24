@@ -576,6 +576,165 @@ def create_routes(agent: "Agent") -> list[Route]:
             "config_updated": True,
         })
 
+    # Admin - Tenant management
+    @require_admin
+    async def admin_tenants_list(request: Request) -> Response:
+        """List all tenants (admin only)."""
+        from maven_core.provisioning.tenant import TenantManager
+
+        await agent._ensure_initialized()
+        tenant_mgr = TenantManager(
+            files=agent.files,
+            kv=agent.kv,
+            db=agent.db,
+        )
+
+        tenants = await tenant_mgr.list_tenants()
+        return JSONResponse({
+            "tenants": [t.to_dict() for t in tenants],
+            "total": len(tenants),
+        })
+
+    @require_admin
+    async def admin_tenant_create(request: Request) -> Response:
+        """Create a new tenant (admin only).
+
+        Request body:
+            - name: Tenant display name (required)
+            - tenant_id: Custom tenant ID (optional, auto-generated if not provided)
+            - settings: Initial settings (optional)
+            - limits: Resource limits (optional)
+            - metadata: Additional metadata (optional)
+        """
+        from maven_core.provisioning.tenant import TenantManager
+
+        try:
+            body = await request.json()
+        except json.JSONDecodeError:
+            return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+        name = body.get("name")
+        if not name:
+            return JSONResponse({"error": "Missing required field: name"}, status_code=400)
+
+        await agent._ensure_initialized()
+        tenant_mgr = TenantManager(
+            files=agent.files,
+            kv=agent.kv,
+            db=agent.db,
+        )
+
+        result = await tenant_mgr.create_tenant(
+            name=name,
+            tenant_id=body.get("tenant_id"),
+            settings=body.get("settings"),
+            limits=body.get("limits"),
+            metadata=body.get("metadata"),
+        )
+
+        if not result.success:
+            return JSONResponse({
+                "error": result.message,
+                "tenant_id": result.tenant_id,
+            }, status_code=409)
+
+        return JSONResponse({
+            "tenant_id": result.tenant_id,
+            "name": result.config.name,
+            "status": result.config.status,
+            "created_at": result.config.created_at,
+            "message": result.message,
+        }, status_code=201)
+
+    @require_admin
+    async def admin_tenant_detail(request: Request) -> Response:
+        """Get tenant details (admin only)."""
+        from maven_core.provisioning.tenant import TenantManager
+
+        tenant_id = request.path_params["tenant_id"]
+
+        await agent._ensure_initialized()
+        tenant_mgr = TenantManager(
+            files=agent.files,
+            kv=agent.kv,
+            db=agent.db,
+        )
+
+        tenant = await tenant_mgr.get_tenant(tenant_id)
+        if not tenant:
+            return JSONResponse({"error": f"Tenant not found: {tenant_id}"}, status_code=404)
+
+        return JSONResponse(tenant.to_dict())
+
+    @require_admin
+    async def admin_tenant_delete(request: Request) -> Response:
+        """Delete a tenant (admin only)."""
+        from maven_core.provisioning.tenant import TenantManager
+
+        tenant_id = request.path_params["tenant_id"]
+
+        await agent._ensure_initialized()
+        tenant_mgr = TenantManager(
+            files=agent.files,
+            kv=agent.kv,
+            db=agent.db,
+        )
+
+        success = await tenant_mgr.delete_tenant(tenant_id)
+        if not success:
+            return JSONResponse({"error": f"Tenant not found: {tenant_id}"}, status_code=404)
+
+        return JSONResponse({
+            "tenant_id": tenant_id,
+            "deleted": True,
+        })
+
+    @require_admin
+    async def admin_tenant_suspend(request: Request) -> Response:
+        """Suspend a tenant (admin only)."""
+        from maven_core.provisioning.tenant import TenantManager
+
+        tenant_id = request.path_params["tenant_id"]
+
+        await agent._ensure_initialized()
+        tenant_mgr = TenantManager(
+            files=agent.files,
+            kv=agent.kv,
+            db=agent.db,
+        )
+
+        success = await tenant_mgr.suspend_tenant(tenant_id)
+        if not success:
+            return JSONResponse({"error": f"Tenant not found: {tenant_id}"}, status_code=404)
+
+        return JSONResponse({
+            "tenant_id": tenant_id,
+            "status": "suspended",
+        })
+
+    @require_admin
+    async def admin_tenant_activate(request: Request) -> Response:
+        """Activate a suspended tenant (admin only)."""
+        from maven_core.provisioning.tenant import TenantManager
+
+        tenant_id = request.path_params["tenant_id"]
+
+        await agent._ensure_initialized()
+        tenant_mgr = TenantManager(
+            files=agent.files,
+            kv=agent.kv,
+            db=agent.db,
+        )
+
+        success = await tenant_mgr.activate_tenant(tenant_id)
+        if not success:
+            return JSONResponse({"error": f"Tenant not found: {tenant_id}"}, status_code=404)
+
+        return JSONResponse({
+            "tenant_id": tenant_id,
+            "status": "active",
+        })
+
     return [
         # Health
         Route("/health", health, methods=["GET"]),
@@ -611,7 +770,15 @@ def create_routes(agent: "Agent") -> list[Route]:
         Route("/admin/users/{user_id}", admin_user_update, methods=["PUT"]),
         Route("/admin/users/{user_id}", admin_user_delete, methods=["DELETE"]),
 
-        # Tenant
+        # Admin - Tenants
+        Route("/admin/tenants", admin_tenants_list, methods=["GET"]),
+        Route("/admin/tenants", admin_tenant_create, methods=["POST"]),
+        Route("/admin/tenants/{tenant_id}", admin_tenant_detail, methods=["GET"]),
+        Route("/admin/tenants/{tenant_id}", admin_tenant_delete, methods=["DELETE"]),
+        Route("/admin/tenants/{tenant_id}/suspend", admin_tenant_suspend, methods=["POST"]),
+        Route("/admin/tenants/{tenant_id}/activate", admin_tenant_activate, methods=["POST"]),
+
+        # Tenant (current tenant context)
         Route("/tenant", tenant_info, methods=["GET"]),
         Route("/tenant", tenant_update, methods=["PUT"]),
         Route("/tenant/config", tenant_config, methods=["GET"]),
