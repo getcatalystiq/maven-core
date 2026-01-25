@@ -33,6 +33,6 @@ instance_type = "basic"
 [vars]
 JWT_ISSUER = "https://maven.example.com"
 CONTROL_PLANE_URL = "https://maven-control-plane.tools-7b7.workers.dev"
-TENANT_ID = "dd7e0321-d274-4a79-942a-bb190dd3720b"
+TENANT_ID = "adf19b14-cce7-42a4-a5f4-c822e28a4153"
 TENANT_SLUG = "easycarnet"
 AWS_REGION = "us-east-1"

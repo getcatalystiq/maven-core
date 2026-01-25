@@ -137,6 +137,9 @@ export class TenantAgent extends DurableObject<Env> {
 
   /**
    * Ensure the agent HTTP server is running in the sandbox
+   *
+   * Optimized: On warm path, skip health check and trust agentProcess flag.
+   * If proxy fails later, caller will reset and retry.
    */
   private async ensureAgentRunning(config: SandboxConfig, requestStart?: number): Promise<void> {
     const t0 = requestStart || Date.now();
@@ -144,24 +147,14 @@ export class TenantAgent extends DurableObject<Env> {
 
     if (!this.sandbox) return;
 
-    // Claude CLI tests are no longer needed - the issue was running as root
-    // The container now runs as the 'maven' user which allows --dangerously-skip-permissions
-
-    // Check if agent process is already running
+    // FAST PATH: If we believe agent is running, skip health check
+    // If it's actually dead, proxy will fail and caller will retry
     if (this.agentProcess?.running) {
-      console.log(`[TIMING] T+${t()}ms: Checking if existing agent is healthy`);
-      // Verify the process is actually still running by checking the port
-      const portInUse = await this.sandbox.exec('curl -s http://localhost:8080/health');
-      if (portInUse.success && portInUse.stdout.includes('ok')) {
-        console.log(`[TIMING] T+${t()}ms: Agent already running and healthy (FAST PATH)`);
-        return;
-      }
-      // Process flag says running but health check failed - reset
-      console.log(`[TIMING] T+${t()}ms: Agent flag set but health check failed, resetting`);
-      this.agentProcess = null;
+      console.log(`[TIMING] T+${t()}ms: Agent flagged as running (FAST PATH - no health check)`);
+      return;
     }
 
-    // Check if something else is using port 8080
+    // Check if something else is using port 8080 (handles DO state loss but sandbox kept running)
     console.log(`[TIMING] T+${t()}ms: Checking if port 8080 has existing server`);
     const existingPort = await this.sandbox.exec('curl -s http://localhost:8080/health');
     if (existingPort.success && existingPort.stdout.includes('ok')) {
@@ -370,16 +363,24 @@ export class TenantAgent extends DurableObject<Env> {
       await this.ensureSandboxReady(tenantId, userId, requestStart);
       console.log(`[TIMING] T+${t()}ms: Sandbox ready, proxying to agent`);
 
-      // Proxy request to agent in sandbox
-      const agentResponse = await this.proxyToSandbox(
-        '/chat',
-        tenantId,
-        userId,
-        {
+      // Proxy request to agent in sandbox (with retry on failure)
+      let agentResponse: Response;
+      try {
+        agentResponse = await this.proxyToSandbox('/chat', tenantId, userId, {
           message: body.message,
           sessionId,
-        }
-      );
+        });
+      } catch (proxyError) {
+        // Proxy failed - agent may have crashed, reset and retry once
+        console.log(`[TIMING] T+${t()}ms: Proxy failed, resetting agent and retrying`);
+        this.agentProcess = null;
+        await this.ensureAgentRunning({ tenantId, userId, skills: [], connectors: [] }, requestStart);
+        console.log(`[TIMING] T+${t()}ms: Agent restarted, retrying proxy`);
+        agentResponse = await this.proxyToSandbox('/chat', tenantId, userId, {
+          message: body.message,
+          sessionId,
+        });
+      }
       console.log(`[TIMING] T+${t()}ms: Agent response received`);
 
       if (!agentResponse.ok) {
@@ -465,10 +466,17 @@ export class TenantAgent extends DurableObject<Env> {
       await this.ensureSandboxReady(tenantId, userId, requestStart);
       console.log(`[TIMING] T+${t()}ms: Sandbox ready for streaming`);
 
-      // For streaming, we need to use a different approach
-      // Start a streaming exec command that pipes output
       if (!this.sandbox) {
         throw new Error('Sandbox not initialized');
+      }
+
+      // Quick health check before streaming (can't easily retry mid-stream)
+      const healthCheck = await this.sandbox.exec('curl -s http://localhost:8080/health');
+      if (!healthCheck.success || !healthCheck.stdout.includes('ok')) {
+        console.log(`[TIMING] T+${t()}ms: Agent not healthy for streaming, restarting`);
+        this.agentProcess = null;
+        await this.ensureAgentRunning({ tenantId, userId, skills: [], connectors: [] }, requestStart);
+        console.log(`[TIMING] T+${t()}ms: Agent restarted for streaming`);
       }
 
       const bodyJson = JSON.stringify({
