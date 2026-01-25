@@ -471,7 +471,7 @@ export class TenantAgent extends DurableObject<Env> {
               `-H 'X-Tenant-Id: ${tenantId}' ` +
               `-H 'X-User-Id: ${userId}' ` +
               `-d '${escapedBody}'`,
-            { stream: true, onOutput: (chunk) => writer.write(new TextEncoder().encode(chunk)) }
+            { stream: true, onOutput: (_stream, data) => writer.write(new TextEncoder().encode(data)) }
           );
 
           if (!result.success) {

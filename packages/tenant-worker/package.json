@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "wrangler dev",
     "build": "tsc",
+    "build:bundle": "esbuild src/index.ts --bundle --format=esm --platform=node --target=esnext --outfile=dist/bundle.js --external:cloudflare:workers --external:@cloudflare/sandbox --conditions=workerd",
     "deploy": "wrangler deploy --env production",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"

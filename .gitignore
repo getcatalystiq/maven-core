@@ -1,30 +1,9 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
+# Dependencies
+node_modules/
 
-# Virtual environments
-venv/
-ENV/
-env/
-.venv/
+# Build outputs
+dist/
+*.tsbuildinfo
 
 # IDE
 .idea/
@@ -34,31 +13,43 @@ env/
 *~
 
 # Testing
-.pytest_cache/
-.coverage
-htmlcov/
-.tox/
-.nox/
+coverage/
+.vitest/
 
-# mypy
-.mypy_cache/
+# Turborepo
+.turbo/
 
-# Data directories
-data/
-*.db
+# Wrangler
+.wrangler/
+.dev.vars
 
-# Config (may contain secrets)
-config.yaml
-config.local.yaml
+# Local development keys
+.keys/
+
+# Local dev server state
+.pids/
+.logs/
 
 # Environment
 .env
 .env.local
+.env.*.local
 
-# Node (for worker)
-node_modules/
-worker/dist/
+# Data directories
+data/
+*.db
+*.sqlite
 
 # OS
 .DS_Store
 Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Optional npm cache
+.npm
+
+# TypeScript cache
+*.tsbuildinfo
