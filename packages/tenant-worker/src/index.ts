@@ -49,6 +49,9 @@ export interface Env {
 
   // Agent URL for local development
   AGENT_URL?: string;
+
+  // Sandbox configuration
+  SANDBOX_SLEEP_AFTER?: string; // e.g., '10m', '30m', '1h' - default: '10m'
 }
 
 // Context variables type

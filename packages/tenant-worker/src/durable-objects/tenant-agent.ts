@@ -77,8 +77,13 @@ export class TenantAgent extends DurableObject<Env> {
     // Get or create sandbox instance
     if (!this.sandbox) {
       console.log(`[TIMING] T+${t()}ms: Creating new sandbox instance`);
-      this.sandbox = getSandbox(this.env.Sandbox, `tenant-${tenantId}`);
-      console.log(`[TIMING] T+${t()}ms: Sandbox instance created`);
+      // Configure sandbox sleep timeout based on tier (TODO: fetch from tenant config)
+      // Default: 10 minutes, Pro tier could use longer or keepAlive: true
+      const sleepAfter = this.env.SANDBOX_SLEEP_AFTER || '10m';
+      this.sandbox = getSandbox(this.env.Sandbox, `tenant-${tenantId}`, {
+        sleepAfter,
+      });
+      console.log(`[TIMING] T+${t()}ms: Sandbox instance created (sleepAfter: ${sleepAfter})`);
     } else {
       console.log(`[TIMING] T+${t()}ms: Reusing existing sandbox instance`);
     }
