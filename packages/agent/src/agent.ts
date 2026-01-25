@@ -237,6 +237,7 @@ export async function chatSync(
   message: string,
   options: ChatOptions
 ): Promise<ChatResult> {
+  const t0 = Date.now();
   let response = '';
   let sessionId = options.sessionId || '';
   let usage = {
@@ -246,7 +247,15 @@ export async function chatSync(
     cacheWriteTokens: 0,
   };
 
+  let firstChunkTime: number | null = null;
+
+  console.log(`[SDK TIMING] T+0ms: chatSync started, calling chat()`);
   for await (const msg of chat(message, options)) {
+    if (!firstChunkTime) {
+      firstChunkTime = Date.now() - t0;
+      console.log(`[SDK TIMING] T+${firstChunkTime}ms: First message from SDK (time to first chunk)`);
+    }
+
     if (msg.type === 'assistant') {
       // Extract text content
       for (const block of msg.message.content) {
@@ -264,6 +273,8 @@ export async function chatSync(
       };
     }
   }
+
+  console.log(`[SDK TIMING] T+${Date.now() - t0}ms: chatSync completed, total time`);
 
   return {
     response,

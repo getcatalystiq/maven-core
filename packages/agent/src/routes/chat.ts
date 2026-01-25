@@ -29,6 +29,7 @@ app.post(
   '/',
   zValidator('json', chatRequestSchema),
   async (c) => {
+    const t0 = Date.now();
     const { message, sessionId, skills } = c.req.valid('json');
 
     // Get context from headers
@@ -36,18 +37,18 @@ app.post(
     const userId = c.req.header('X-User-Id') || 'anonymous';
     const userRoles = safeParseRoles(c.req.header('X-User-Roles'));
 
+    console.log(`[AGENT TIMING] T+0ms: Agent received chat request`);
+
     try {
       // Log environment for debugging
-      console.log('Chat request environment:', {
+      console.log(`[AGENT TIMING] T+${Date.now() - t0}ms: Environment check`, {
         CLAUDE_CODE_USE_BEDROCK: process.env.CLAUDE_CODE_USE_BEDROCK,
         AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID ? 'set' : 'not set',
-        AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY ? 'set' : 'not set',
         AWS_REGION: process.env.AWS_REGION,
         ANTHROPIC_MODEL: process.env.ANTHROPIC_MODEL,
-        ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ? 'set' : 'not set',
-        PATH: process.env.PATH,
       });
 
+      console.log(`[AGENT TIMING] T+${Date.now() - t0}ms: Calling chatSync (Claude SDK)`);
       const result = await chatSync(message, {
         sessionId,
         tenantId,
@@ -55,6 +56,7 @@ app.post(
         userRoles,
         skills,
       });
+      console.log(`[AGENT TIMING] T+${Date.now() - t0}ms: chatSync completed`);
 
       return c.json({
         response: result.response,

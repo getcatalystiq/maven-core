@@ -68,25 +68,42 @@ export class TenantAgent extends DurableObject<Env> {
   /**
    * Ensure sandbox is ready with current configuration
    */
-  private async ensureSandboxReady(tenantId: string, userId: string): Promise<void> {
+  private async ensureSandboxReady(tenantId: string, userId: string, requestStart?: number): Promise<void> {
+    const t0 = requestStart || Date.now();
+    const t = () => Date.now() - t0;
+
+    console.log(`[TIMING] T+${t()}ms: ensureSandboxReady started`);
+
     // Get or create sandbox instance
     if (!this.sandbox) {
+      console.log(`[TIMING] T+${t()}ms: Creating new sandbox instance`);
       this.sandbox = getSandbox(this.env.Sandbox, `tenant-${tenantId}`);
+      console.log(`[TIMING] T+${t()}ms: Sandbox instance created`);
+    } else {
+      console.log(`[TIMING] T+${t()}ms: Reusing existing sandbox instance`);
     }
 
     // Fetch configuration from Control Plane
+    console.log(`[TIMING] T+${t()}ms: Fetching config from Control Plane`);
     const config = await this.fetchSandboxConfig(tenantId, userId);
+    console.log(`[TIMING] T+${t()}ms: Config fetched (${config.skills.length} skills, ${config.connectors.length} connectors)`);
+
     const newHash = this.computeConfigHash(config);
 
     // Only re-inject if configuration changed
     if (this.configHash !== newHash) {
-      console.log(`Configuration changed for tenant ${tenantId}, re-injecting...`);
+      console.log(`[TIMING] T+${t()}ms: Config changed, re-injecting skills`);
       await this.injectConfiguration(config);
       this.configHash = newHash;
+      console.log(`[TIMING] T+${t()}ms: Skills injected`);
+    } else {
+      console.log(`[TIMING] T+${t()}ms: Config unchanged, skipping injection`);
     }
 
     // Ensure agent is running
-    await this.ensureAgentRunning(config);
+    console.log(`[TIMING] T+${t()}ms: Ensuring agent is running`);
+    await this.ensureAgentRunning(config, t0);
+    console.log(`[TIMING] T+${t()}ms: Agent running confirmed`);
   }
 
   /**
@@ -121,7 +138,10 @@ export class TenantAgent extends DurableObject<Env> {
   /**
    * Ensure the agent HTTP server is running in the sandbox
    */
-  private async ensureAgentRunning(config: SandboxConfig): Promise<void> {
+  private async ensureAgentRunning(config: SandboxConfig, requestStart?: number): Promise<void> {
+    const t0 = requestStart || Date.now();
+    const t = () => Date.now() - t0;
+
     if (!this.sandbox) return;
 
     // Claude CLI tests are no longer needed - the issue was running as root
@@ -129,24 +149,27 @@ export class TenantAgent extends DurableObject<Env> {
 
     // Check if agent process is already running
     if (this.agentProcess?.running) {
+      console.log(`[TIMING] T+${t()}ms: Checking if existing agent is healthy`);
       // Verify the process is actually still running by checking the port
       const portInUse = await this.sandbox.exec('curl -s http://localhost:8080/health');
       if (portInUse.success && portInUse.stdout.includes('ok')) {
-        console.log('Agent process already running, verified via health check');
+        console.log(`[TIMING] T+${t()}ms: Agent already running and healthy (FAST PATH)`);
         return;
       }
       // Process flag says running but health check failed - reset
-      console.log('Agent process flag was set but health check failed, resetting');
+      console.log(`[TIMING] T+${t()}ms: Agent flag set but health check failed, resetting`);
       this.agentProcess = null;
     }
 
     // Check if something else is using port 8080
+    console.log(`[TIMING] T+${t()}ms: Checking if port 8080 has existing server`);
     const existingPort = await this.sandbox.exec('curl -s http://localhost:8080/health');
     if (existingPort.success && existingPort.stdout.includes('ok')) {
-      console.log('Port 8080 already has a healthy server, reusing');
+      console.log(`[TIMING] T+${t()}ms: Port 8080 already has healthy server (FAST PATH)`);
       this.agentProcess = { pid: 0, running: true };
       return;
     }
+    console.log(`[TIMING] T+${t()}ms: No existing server, need to start agent (COLD START)`);
 
     // Build environment variables for the agent
     const env: Record<string, string> = {
@@ -175,15 +198,7 @@ export class TenantAgent extends DurableObject<Env> {
 
     // Start the agent server as a background process
     // Path matches Docker image: WORKDIR /app/packages/agent with build output in dist/
-    console.log('Starting agent HTTP server...');
-
-    // Check if the dist file exists before starting
-    const checkFile = await this.sandbox.exec('ls -la /app/packages/agent/dist/index.js');
-    console.log(`Agent file check: ${checkFile.success ? checkFile.stdout : 'FILE NOT FOUND: ' + checkFile.stderr}`);
-
-    // Check Claude CLI installation
-    const claudeCheck = await this.sandbox.exec('which claude && claude --version 2>&1');
-    console.log(`Claude CLI check: ${claudeCheck.success ? claudeCheck.stdout : 'NOT FOUND: ' + claudeCheck.stderr}`);
+    console.log(`[TIMING] T+${t()}ms: Starting agent HTTP server (COLD START)`);
 
 
     // Log environment being passed (redact sensitive values)
@@ -200,6 +215,7 @@ export class TenantAgent extends DurableObject<Env> {
 
     // Start with output redirection to log file for debugging
     // Use bash -c to ensure shell redirection works
+    console.log(`[TIMING] T+${t()}ms: Calling startProcess`);
     const process = await this.sandbox.startProcess(
       'bash -c "node /app/packages/agent/dist/index.js > /tmp/agent.log 2>&1"',
       {
@@ -207,36 +223,24 @@ export class TenantAgent extends DurableObject<Env> {
         env,
       }
     );
+    console.log(`[TIMING] T+${t()}ms: startProcess returned, pid=${process.pid}`);
 
     this.agentProcess = {
       pid: process.pid ?? 0,
       running: true,
     };
 
-    // Wait a moment for process to start writing logs
-    await new Promise((resolve) => setTimeout(resolve, 3000));
-
-    // Check agent log for startup errors
-    const logCheck = await this.sandbox.exec('cat /tmp/agent.log 2>&1 | head -50');
-    console.log(`Agent startup log (first 50 lines): ${JSON.stringify(logCheck.stdout || logCheck.stderr || 'empty')}`);
-
-    // Check what ports are listening
-    const portCheck = await this.sandbox.exec('ss -tulpn 2>&1 || netstat -tulpn 2>&1 || echo "no network tools"');
-    console.log(`Listening ports: ${JSON.stringify(portCheck.stdout || portCheck.stderr || 'none')}`);
-
-    // Check if localhost resolves
-    const localhostCheck = await this.sandbox.exec('curl -v http://127.0.0.1:8080/health 2>&1');
-    console.log(`Curl to 127.0.0.1: ${JSON.stringify(localhostCheck.stdout || localhostCheck.stderr || 'none')}`);
-
-    // Wait for the server to be ready
+    // Wait for the server to be ready (polls with short intervals instead of hardcoded wait)
+    console.log(`[TIMING] T+${t()}ms: Waiting for agent to be ready`);
     await this.waitForServer();
-    console.log('Agent HTTP server is ready');
+    console.log(`[TIMING] T+${t()}ms: Agent HTTP server is ready`);
   }
 
   /**
    * Wait for the agent HTTP server to be ready
+   * Uses short poll intervals (200ms) for faster startup detection
    */
-  private async waitForServer(maxAttempts = 15, delayMs = 1000): Promise<void> {
+  private async waitForServer(maxAttempts = 30, delayMs = 200): Promise<void> {
     if (!this.sandbox) return;
 
     const diagnostics: string[] = [];
@@ -347,7 +351,12 @@ export class TenantAgent extends DurableObject<Env> {
     tenantId: string,
     userId: string
   ): Promise<Response> {
+    const requestStart = parseInt(request.headers.get('X-Request-Start') || '0') || Date.now();
+    const t = () => Date.now() - requestStart;
+
     try {
+      console.log(`[TIMING] T+${t()}ms: DO handleChat started`);
+
       // Local dev mode: proxy to local agent
       if (this.env.AGENT_URL) {
         return this.proxyToAgent(request, '/chat');
@@ -355,9 +364,11 @@ export class TenantAgent extends DurableObject<Env> {
 
       const body = (await request.json()) as { message: string; sessionId?: string };
       const sessionId = body.sessionId || crypto.randomUUID();
+      console.log(`[TIMING] T+${t()}ms: Request body parsed`);
 
       // Ensure sandbox is ready with current config
-      await this.ensureSandboxReady(tenantId, userId);
+      await this.ensureSandboxReady(tenantId, userId, requestStart);
+      console.log(`[TIMING] T+${t()}ms: Sandbox ready, proxying to agent`);
 
       // Proxy request to agent in sandbox
       const agentResponse = await this.proxyToSandbox(
@@ -369,6 +380,7 @@ export class TenantAgent extends DurableObject<Env> {
           sessionId,
         }
       );
+      console.log(`[TIMING] T+${t()}ms: Agent response received`);
 
       if (!agentResponse.ok) {
         const errorText = await agentResponse.text();
@@ -434,7 +446,12 @@ export class TenantAgent extends DurableObject<Env> {
     tenantId: string,
     userId: string
   ): Promise<Response> {
+    const requestStart = parseInt(request.headers.get('X-Request-Start') || '0') || Date.now();
+    const t = () => Date.now() - requestStart;
+
     try {
+      console.log(`[TIMING] T+${t()}ms: DO handleStreamChat started`);
+
       // Local dev mode: proxy to local agent
       if (this.env.AGENT_URL) {
         return this.proxyToAgent(request, '/chat/stream');
@@ -442,9 +459,11 @@ export class TenantAgent extends DurableObject<Env> {
 
       const body = (await request.json()) as { message: string; sessionId?: string };
       const sessionId = body.sessionId || crypto.randomUUID();
+      console.log(`[TIMING] T+${t()}ms: Request body parsed`);
 
       // Ensure sandbox is ready
-      await this.ensureSandboxReady(tenantId, userId);
+      await this.ensureSandboxReady(tenantId, userId, requestStart);
+      console.log(`[TIMING] T+${t()}ms: Sandbox ready for streaming`);
 
       // For streaming, we need to use a different approach
       // Start a streaming exec command that pipes output
@@ -574,7 +593,7 @@ export class TenantAgent extends DurableObject<Env> {
       try {
         // Fetch basic config
         const configResponse = await fetch(
-          `${this.env.CONTROL_PLANE_URL}/internal/sandbox-config?tenantId=${tenantId}&userId=${userId}`,
+          `${this.env.CONTROL_PLANE_URL}/internal/config/${tenantId}/${userId}`,
           {
             headers: {
               'X-Internal-Key': this.env.INTERNAL_API_KEY,
@@ -624,7 +643,7 @@ export class TenantAgent extends DurableObject<Env> {
 
     try {
       const response = await fetch(
-        `${this.env.CONTROL_PLANE_URL}/internal/skills/${skillName}/content?tenantId=${tenantId}`,
+        `${this.env.CONTROL_PLANE_URL}/internal/skills/${tenantId}/${skillName}/SKILL.md`,
         {
           headers: {
             'X-Internal-Key': this.env.INTERNAL_API_KEY,

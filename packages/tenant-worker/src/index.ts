@@ -103,12 +103,17 @@ app.use('/sessions/*', jwtAuth);
 
 // Chat endpoint - proxy to Durable Object
 app.post('/chat', async (c) => {
+  const t0 = Date.now();
   const tenantId = c.get('tenantId');
   const userId = c.get('userId');
   const roles = c.get('roles');
 
+  console.log(`[TIMING] T+${Date.now() - t0}ms: Worker received chat request, creating DO stub`);
+
   const agentId = c.env.TENANT_AGENT.idFromName(`tenant-${tenantId}`);
   const agent = c.env.TENANT_AGENT.get(agentId);
+
+  console.log(`[TIMING] T+${Date.now() - t0}ms: DO stub created, preparing request`);
 
   const request = new Request(c.req.url, {
     method: 'POST',
@@ -117,18 +122,26 @@ app.post('/chat', async (c) => {
       'X-User-Id': userId,
       'X-Tenant-Id': tenantId,
       'X-User-Roles': JSON.stringify(roles),
+      'X-Request-Start': t0.toString(),
     },
     body: c.req.raw.body,
   });
 
-  return agent.fetch(request);
+  console.log(`[TIMING] T+${Date.now() - t0}ms: Calling DO fetch`);
+  const response = await agent.fetch(request);
+  console.log(`[TIMING] T+${Date.now() - t0}ms: DO fetch returned`);
+
+  return response;
 });
 
 // Streaming chat endpoint
 app.post('/chat/stream', async (c) => {
+  const t0 = Date.now();
   const tenantId = c.get('tenantId');
   const userId = c.get('userId');
   const roles = c.get('roles');
+
+  console.log(`[TIMING] T+${Date.now() - t0}ms: Worker received stream request`);
 
   const agentId = c.env.TENANT_AGENT.idFromName(`tenant-${tenantId}`);
   const agent = c.env.TENANT_AGENT.get(agentId);
@@ -140,11 +153,16 @@ app.post('/chat/stream', async (c) => {
       'X-User-Id': userId,
       'X-Tenant-Id': tenantId,
       'X-User-Roles': JSON.stringify(roles),
+      'X-Request-Start': t0.toString(),
     },
     body: c.req.raw.body,
   });
 
-  return agent.fetch(request);
+  console.log(`[TIMING] T+${Date.now() - t0}ms: Calling DO fetch for stream`);
+  const response = await agent.fetch(request);
+  console.log(`[TIMING] T+${Date.now() - t0}ms: DO fetch returned stream response`);
+
+  return response;
 });
 
 // SageMaker-compatible invocations endpoint
