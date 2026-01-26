@@ -95,6 +95,38 @@ export const updateTenantSchema = z.object({
   enabled: z.boolean().optional(),
 });
 
+// LLM provider types
+export const llmProviderSchema = z.enum(['anthropic', 'aws-bedrock']);
+
+// LLM credentials schema for tenant configuration
+export const llmCredentialsSchema = z.discriminatedUnion('provider', [
+  z.object({
+    provider: z.literal('anthropic'),
+    anthropic_api_key: z.string().min(1),
+  }),
+  z.object({
+    provider: z.literal('aws-bedrock'),
+    aws_access_key_id: z.string().min(1),
+    aws_secret_access_key: z.string().min(1),
+    aws_region: z.string().default('us-east-1'),
+  }),
+]);
+
+// Agent settings schema
+export const agentSettingsSchema = z.object({
+  model: z.string().optional(),
+  max_turns: z.number().int().min(1).max(100).optional(),
+  max_budget: z.number().positive().optional(),
+  llm: llmCredentialsSchema.optional(),
+});
+
+// Update tenant settings (includes agent settings with LLM credentials)
+export const updateTenantSettingsSchema = z.object({
+  settings: z.object({
+    agent: agentSettingsSchema.optional(),
+  }),
+});
+
 // Skill schemas
 export const createSkillSchema = z.object({
   name: skillNameSchema,
@@ -180,3 +212,7 @@ export type CreateConnectorRequest = z.infer<typeof createConnectorSchema>;
 export type UpdateConnectorRequest = z.infer<typeof updateConnectorSchema>;
 export type ChatRequest = z.infer<typeof chatRequestSchema>;
 export type PaginationParams = z.infer<typeof paginationSchema>;
+export type LLMProvider = z.infer<typeof llmProviderSchema>;
+export type LLMCredentials = z.infer<typeof llmCredentialsSchema>;
+export type AgentSettings = z.infer<typeof agentSettingsSchema>;
+export type UpdateTenantSettingsRequest = z.infer<typeof updateTenantSettingsSchema>;
