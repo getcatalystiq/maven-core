@@ -2,14 +2,13 @@
  * Streaming chat route handler
  * Uses Streamable HTTP (NDJSON) per MCP 2025 spec
  *
- * Leverages streaming input mode to keep SDK processes alive between messages,
- * reducing response time from ~10s to ~2s for subsequent messages.
+ * Uses the same chat() generator as the main agent for reliable streaming.
  */
 
 import { Hono } from 'hono';
 import { zValidator } from '@hono/zod-validator';
 import { chatRequestSchema } from '@maven/shared';
-import { getOrCreateSession, sendMessage, getSessionStats } from '../session-manager';
+import { chat, type TimingEvent } from '../agent';
 
 const app = new Hono();
 
@@ -37,12 +36,11 @@ function ndjsonLine(data: unknown): string {
 }
 
 /**
- * Session stats endpoint with version info
+ * Stats endpoint
  */
 app.get('/stats', (c) => {
   return c.json({
-    version: 'v1.3.3-streaming-input',
-    ...getSessionStats(),
+    version: 'v1.3.4-fixed-streaming',
   });
 });
 
@@ -86,39 +84,33 @@ app.post(
         console.log(`[STREAM] T+${t()}ms: Emitted start event`);
 
         try {
-          // Get or create session (streaming input mode keeps process alive)
-          console.log(`[STREAM] T+${t()}ms: Getting session...`);
-          const session = await getOrCreateSession(
+          console.log(`[STREAM] T+${t()}ms: Calling chat() function`);
+
+          // Use the working chat() generator from agent.ts
+          for await (const msg of chat(message, {
             sessionId,
             tenantId,
             userId,
-            userRoles
-          );
-
-          const sessionWarmup = t();
-          console.log(`[STREAM] T+${sessionWarmup}ms: Session ready (${session.messageCount > 0 ? 'WARM' : 'COLD'})`);
-
-          // Emit session info
-          controller.enqueue(
-            encoder.encode(ndjsonLine({
-              type: 'session_info',
-              sessionId: session.id,
-              isWarm: session.messageCount > 0,
-              messageCount: session.messageCount,
-              warmupMs: sessionWarmup,
-            }))
-          );
-
-          // Send message and stream responses
-          console.log(`[STREAM] T+${t()}ms: Sending message...`);
-
-          for await (const msg of sendMessage(session, message)) {
+            userRoles,
+            skills,
+          })) {
             if (!firstMsgTime) {
               firstMsgTime = t();
-              console.log(`[STREAM] T+${firstMsgTime}ms: First message from SDK (type: ${msg.type})`);
+              console.log(`[STREAM] T+${firstMsgTime}ms: First message from Claude SDK (type: ${msg.type})`);
             }
 
-            if (msg.type === 'stream_event') {
+            // Handle timing events (custom type from chat())
+            if (msg.type === 'timing') {
+              const timing = msg as TimingEvent;
+              controller.enqueue(
+                encoder.encode(ndjsonLine({
+                  type: 'timing',
+                  phase: timing.phase,
+                  ms: timing.ms,
+                  details: timing.details,
+                }))
+              );
+            } else if (msg.type === 'stream_event') {
               controller.enqueue(
                 encoder.encode(ndjsonLine({ ...msg, type: 'stream' }))
               );
@@ -148,7 +140,7 @@ app.post(
                 encoder.encode(
                   ndjsonLine({
                     type: 'done',
-                    sessionId: msg.session_id || session.id,
+                    sessionId: msg.session_id || sessionId,
                     usage: {
                       inputTokens: msg.usage.input_tokens,
                       outputTokens: msg.usage.output_tokens,
@@ -156,7 +148,6 @@ app.post(
                     timing: {
                       totalMs: t(),
                       firstMsgMs: firstMsgTime,
-                      isWarm: session.messageCount > 1,
                     },
                   })
                 )
@@ -164,7 +155,7 @@ app.post(
             }
           }
 
-          console.log(`[STREAM] T+${t()}ms: Message completed`);
+          console.log(`[STREAM] T+${t()}ms: Chat loop completed`);
         } catch (error) {
           const errorMessage = (error as Error).message;
           // Ignore "exit code 1" errors if we already received a result
