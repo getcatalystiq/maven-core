@@ -1,0 +1,141 @@
+name = "maven-tenant"
+main = "src/index.ts"
+compatibility_date = "2025-01-23"
+compatibility_flags = ["nodejs_compat"]
+
+# Enable observability
+[observability]
+enabled = true
+
+# Durable Objects
+[[durable_objects.bindings]]
+name = "TENANT_AGENT"
+class_name = "TenantAgent"
+
+# Sandbox Durable Object binding (for container access)
+[[durable_objects.bindings]]
+name = "Sandbox"
+class_name = "Sandbox"
+
+# Migrations
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["TenantAgent"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["Sandbox"]
+
+# Container for agent sandbox
+[[containers]]
+class_name = "Sandbox"
+image = "registry.cloudflare.com/7b7fb01e095cae40c829f948caa48f54/maven-agent:v1.3.3"
+instance_type = "basic"
+
+# Environment variables
+[vars]
+JWT_ISSUER = "https://maven.example.com"
+CONTROL_PLANE_URL = "https://maven-control-plane.tools-7b7.workers.dev"
+# Tenant-specific vars (overridden via --var for dedicated deployments)
+TENANT_ID = ""
+TENANT_SLUG = ""
+AWS_REGION = "us-east-1"
+
+# Cloudflare Secrets Store bindings (shared secrets across workers)
+# Uses same store as control-plane
+# @see https://developers.cloudflare.com/secrets-store/
+# Store ID: 4f06aa96622946a4b336737a727e9354
+[[secrets_store_secrets]]
+binding = "JWT_PUBLIC_KEY"
+store_id = "4f06aa96622946a4b336737a727e9354"
+secret_name = "maven-jwt-public-key"
+
+[[secrets_store_secrets]]
+binding = "INTERNAL_API_KEY"
+store_id = "4f06aa96622946a4b336737a727e9354"
+secret_name = "maven-internal-api-key"
+
+# Per-worker secrets (not shared via Secrets Store):
+# wrangler secret put ANTHROPIC_API_KEY (if using Anthropic API directly)
+# wrangler secret put AWS_ACCESS_KEY_ID (if using Bedrock)
+# wrangler secret put AWS_SECRET_ACCESS_KEY (if using Bedrock)
+
+# Local development server config
+[dev]
+port = 8788
+
+# Development configuration
+[env.development]
+name = "maven-tenant-dev"
+
+[env.development.vars]
+AGENT_URL = "http://localhost:8080"
+CONTROL_PLANE_URL = "http://localhost:8787"
+
+# Production configuration with Cloudflare Sandbox SDK
+# This is the shared tenant worker. For enterprise tenants, dedicated workers
+# are deployed via the Control Plane provisioning API using Cloudflare Workers API.
+#
+# Deployment approaches:
+# - Starter: Uses this shared worker with shared sandbox pool
+# - Pro: Uses this shared worker with dedicated container
+# - Enterprise: Gets dedicated worker deployed via Control Plane
+[env.production]
+name = "maven-tenant"
+
+[env.production.vars]
+JWT_ISSUER = "https://maven.example.com"
+CONTROL_PLANE_URL = "https://maven-control-plane.tools-7b7.workers.dev"
+# Tenant-specific vars (overridden via --var for dedicated deployments)
+TENANT_ID = ""
+TENANT_SLUG = ""
+AWS_REGION = "us-east-1"
+
+# Secrets Store bindings for production
+[[env.production.secrets_store_secrets]]
+binding = "JWT_PUBLIC_KEY"
+store_id = "4f06aa96622946a4b336737a727e9354"
+secret_name = "maven-jwt-public-key"
+
+[[env.production.secrets_store_secrets]]
+binding = "INTERNAL_API_KEY"
+store_id = "4f06aa96622946a4b336737a727e9354"
+secret_name = "maven-internal-api-key"
+
+# Durable Object for production
+[[env.production.durable_objects.bindings]]
+name = "TENANT_AGENT"
+class_name = "TenantAgent"
+
+# Sandbox SDK Container Configuration
+# The Sandbox class is exported from @cloudflare/sandbox and provides
+# file injection, command execution, and process management.
+[[env.production.containers]]
+class_name = "Sandbox"
+image = "registry.cloudflare.com/7b7fb01e095cae40c829f948caa48f54/maven-agent:v1.3.3"
+instance_type = "basic"
+
+[[env.production.durable_objects.bindings]]
+name = "Sandbox"
+class_name = "Sandbox"
+
+# Migrations for production - must include all DO classes
+[[env.production.migrations]]
+tag = "v1"
+new_sqlite_classes = ["TenantAgent"]
+
+[[env.production.migrations]]
+tag = "v2"
+new_sqlite_classes = ["Sandbox"]
+
+# Per-tenant deployment (via tenant CLI)
+# For dedicated tenant workers, use the tenant CLI script:
+#
+#   npm run tenant dev easycarnet     # Local dev with tenant config
+#   npm run tenant deploy easycarnet  # Deploy dedicated tenant worker
+#   npm run tenant list               # List all tenants
+#
+# The script fetches config from Control Plane's /internal/tenant/:slug endpoint
+# and injects vars via wrangler --var and --name flags:
+#   wrangler dev --name maven-tenant-easycarnet \
+#     --var TENANT_ID:uuid --var TENANT_SLUG:easycarnet

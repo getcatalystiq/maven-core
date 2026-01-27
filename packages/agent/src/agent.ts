@@ -113,6 +113,14 @@ export interface ChatResult {
     cacheReadTokens?: number;
     cacheWriteTokens?: number;
   };
+  timing?: {
+    totalMs: number;
+    skillsLoadMs: number;
+    mcpBuildMs: number;
+    promptBuildMs: number;
+    sdkFirstChunkMs: number;
+    sdkTotalMs: number;
+  };
 }
 
 /**
@@ -133,6 +141,8 @@ function buildQueryOptions(
     allowedTools: ['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep'] as string[],
     systemPrompt,
     mcpServers: Object.keys(mcpServers).length > 0 ? mcpServers : undefined,
+    // Path to globally installed Claude CLI (npm install -g @anthropic-ai/claude-code)
+    pathToClaudeCodeExecutable: '/usr/local/bin/claude',
   };
   console.log('Query options:', {
     model: options.model,
@@ -146,17 +156,34 @@ function buildQueryOptions(
 }
 
 /**
- * Execute a chat request using Claude Agent SDK
+ * Execute a chat request using Claude Agent SDK (streaming)
  *
  * If sessionId is provided, attempts to resume that session first.
  * If resume fails (session doesn't exist), falls back to creating a new session.
  */
+// Custom timing event type for telemetry
+export interface TimingEvent {
+  type: 'timing';
+  phase: string;
+  ms: number;
+  details?: Record<string, unknown>;
+}
+
 export async function* chat(
   message: string,
   options: ChatOptions
-): AsyncGenerator<SDKMessage> {
+): AsyncGenerator<SDKMessage | TimingEvent> {
+  const t0 = Date.now();
+  const t = () => Date.now() - t0;
+
+  console.log(`[CHAT] T+${t()}ms: chat() started`);
+
   // Load skills
+  console.log(`[CHAT] T+${t()}ms: Loading skills...`);
+  const skillsStart = Date.now();
   const allSkills = await loadSkills();
+  const skillsMs = Date.now() - skillsStart;
+  console.log(`[CHAT] T+${t()}ms: Skills loaded (${allSkills.length}) in ${skillsMs}ms`);
 
   // Filter skills based on user roles
   const userRoles = options.userRoles || ['user'];
@@ -168,66 +195,70 @@ export async function* chat(
   }
 
   // Build MCP servers from connectors
+  console.log(`[CHAT] T+${t()}ms: Building MCP servers...`);
+  const mcpStart = Date.now();
   const connectors = parseConnectorsFromEnv();
   const mcpServers = buildMcpServers(connectors);
+  const mcpMs = Date.now() - mcpStart;
+  console.log(`[CHAT] T+${t()}ms: MCP servers built (${Object.keys(mcpServers).length}) in ${mcpMs}ms`);
 
   // Build system prompt
+  console.log(`[CHAT] T+${t()}ms: Building system prompt...`);
+  const promptStart = Date.now();
   const systemPrompt = buildSystemPromptFromSkills(skills);
+  const promptMs = Date.now() - promptStart;
+  console.log(`[CHAT] T+${t()}ms: System prompt built (${systemPrompt.length} chars) in ${promptMs}ms`);
 
-  // If sessionId provided, try to resume first
-  if (options.sessionId) {
-    try {
-      const resumeResult = query({
-        prompt: message,
-        options: buildQueryOptions(systemPrompt, mcpServers, options.model, options.sessionId),
-      });
+  // Emit timing event before SDK call so client can see pre-SDK overhead
+  yield {
+    type: 'timing',
+    phase: 'pre_sdk',
+    ms: t(),
+    details: {
+      skillsMs,
+      mcpMs,
+      promptMs,
+      skillCount: skills.length,
+      promptLength: systemPrompt.length,
+    },
+  } as TimingEvent;
 
-      // Collect messages from resume attempt to check if it was successful
-      // We buffer messages and only yield them if we got meaningful output
-      const bufferedMessages: SDKMessage[] = [];
-      let hasContent = false;
+  // NOTE: Session resume disabled - widget-generated sessionIds don't exist in
+  // Claude CLI's session storage (~/.claude/), causing 6+ second delays when
+  // the SDK tries to load non-existent sessions. Always start fresh queries.
+  // TODO: Re-enable resume only for sessions that originated from Claude SDK responses.
 
-      for await (const msg of resumeResult) {
-        bufferedMessages.push(msg);
-
-        // Check if we got actual content (not just an empty result)
-        if (msg.type === 'assistant' && msg.message.content.length > 0) {
-          hasContent = true;
-        }
-        if (msg.type === 'stream_event') {
-          hasContent = true;
-        }
-        if (msg.type === 'result' && msg.usage.output_tokens > 0) {
-          hasContent = true;
-        }
-      }
-
-      // If we got meaningful content, yield all buffered messages
-      if (hasContent) {
-        for (const msg of bufferedMessages) {
-          yield msg;
-        }
-        return;
-      }
-
-      // Resume returned empty - session doesn't exist, fall through to new session
-      console.log(`Session ${options.sessionId} returned empty response, starting new session`);
-    } catch (error) {
-      // Resume failed - session doesn't exist or is invalid
-      // Log and fall through to create new session
-      console.log(`Session resume failed for ${options.sessionId}, starting new session:`, (error as Error).message);
-    }
-  }
-
-  // Start new session (either no sessionId provided, or resume failed)
+  // Start new session
+  console.log(`[CHAT] T+${t()}ms: Starting Claude SDK query()...`);
+  const sdkStart = Date.now();
   const result = query({
     prompt: message,
     options: buildQueryOptions(systemPrompt, mcpServers, options.model),
   });
 
+  let firstYield = true;
   for await (const msg of result) {
+    if (firstYield) {
+      const sdkFirstYieldMs = Date.now() - sdkStart;
+      console.log(`[CHAT] T+${t()}ms: First yield from SDK (type: ${msg.type}) in ${sdkFirstYieldMs}ms`);
+
+      // Emit timing event for SDK first yield
+      yield {
+        type: 'timing',
+        phase: 'sdk_first_yield',
+        ms: t(),
+        details: {
+          sdkFirstYieldMs,
+          msgType: msg.type,
+        },
+      } as TimingEvent;
+
+      firstYield = false;
+    }
     yield msg;
   }
+
+  console.log(`[CHAT] T+${t()}ms: chat() completed`);
 }
 
 /**
@@ -247,17 +278,66 @@ export async function chatSync(
     cacheWriteTokens: 0,
   };
 
+  // Timing tracking
+  const timing = {
+    totalMs: 0,
+    skillsLoadMs: 0,
+    mcpBuildMs: 0,
+    promptBuildMs: 0,
+    sdkFirstChunkMs: 0,
+    sdkTotalMs: 0,
+  };
+
   let firstChunkTime: number | null = null;
 
-  console.log(`[SDK TIMING] T+0ms: chatSync started, calling chat()`);
-  for await (const msg of chat(message, options)) {
+  console.log(`[SDK TIMING] T+0ms: chatSync started`);
+
+  // Load skills with timing
+  const skillsStart = Date.now();
+  const allSkills = await loadSkills();
+  timing.skillsLoadMs = Date.now() - skillsStart;
+  console.log(`[SDK TIMING] T+${Date.now() - t0}ms: Skills loaded (${allSkills.length}) in ${timing.skillsLoadMs}ms`);
+
+  // Filter skills based on user roles
+  const userRoles = options.userRoles || ['user'];
+  let skills = filterSkillsByRoles(allSkills, userRoles);
+  if (options.skills && options.skills.length > 0) {
+    skills = skills.filter((s) => options.skills!.includes(s.name));
+  }
+
+  // Build MCP servers with timing
+  const mcpStart = Date.now();
+  const connectors = parseConnectorsFromEnv();
+  const mcpServers = buildMcpServers(connectors);
+  timing.mcpBuildMs = Date.now() - mcpStart;
+  console.log(`[SDK TIMING] T+${Date.now() - t0}ms: MCP built in ${timing.mcpBuildMs}ms`);
+
+  // Build system prompt with timing
+  const promptStart = Date.now();
+  const systemPrompt = buildSystemPromptFromSkills(skills);
+  timing.promptBuildMs = Date.now() - promptStart;
+  console.log(`[SDK TIMING] T+${Date.now() - t0}ms: Prompt built (${systemPrompt.length} chars) in ${timing.promptBuildMs}ms`);
+
+  // SDK query with timing
+  const sdkStart = Date.now();
+  console.log(`[SDK TIMING] T+${Date.now() - t0}ms: Starting SDK query...`);
+
+  // Note: Only pass resume if we're explicitly resuming an existing session
+  // Passing a new UUID as resume causes the SDK to try to load a non-existent session
+  // For new sessions, let the SDK generate its own session ID
+  const result = query({
+    prompt: message,
+    options: buildQueryOptions(systemPrompt, mcpServers, options.model),
+  });
+
+  for await (const msg of result) {
     if (!firstChunkTime) {
-      firstChunkTime = Date.now() - t0;
-      console.log(`[SDK TIMING] T+${firstChunkTime}ms: First message from SDK (time to first chunk)`);
+      firstChunkTime = Date.now() - sdkStart;
+      timing.sdkFirstChunkMs = firstChunkTime;
+      console.log(`[SDK TIMING] T+${Date.now() - t0}ms: First SDK chunk in ${firstChunkTime}ms`);
     }
 
     if (msg.type === 'assistant') {
-      // Extract text content
       for (const block of msg.message.content) {
         if (block.type === 'text') {
           response += block.text;
@@ -274,12 +354,15 @@ export async function chatSync(
     }
   }
 
-  console.log(`[SDK TIMING] T+${Date.now() - t0}ms: chatSync completed, total time`);
+  timing.sdkTotalMs = Date.now() - sdkStart;
+  timing.totalMs = Date.now() - t0;
+  console.log(`[SDK TIMING] T+${timing.totalMs}ms: chatSync completed (SDK: ${timing.sdkTotalMs}ms)`);
 
   return {
     response,
     sessionId,
     usage,
+    timing,
   };
 }
 

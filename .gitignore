@@ -22,6 +22,7 @@ coverage/
 # Wrangler
 .wrangler/
 .dev.vars
+.tenant-config/
 
 # Local development keys
 .keys/

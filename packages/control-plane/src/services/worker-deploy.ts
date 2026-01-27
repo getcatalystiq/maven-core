@@ -9,14 +9,122 @@
  * @see https://developers.cloudflare.com/durable-objects/
  */
 
+import { getSecret, getSecrets } from '@maven/shared';
 import type { Env } from '../index';
 
 // Cloudflare API base URL
 const CF_API_BASE = 'https://api.cloudflare.com/client/v4';
 
-// Container image for tenant sandboxes
-// v1.5.0: Non-root user fix (Claude CLI requires non-root for --dangerously-skip-permissions)
-const SANDBOX_IMAGE = 'registry.cloudflare.com/7b7fb01e095cae40c829f948caa48f54/maven-agent:v1.5.0';
+/**
+ * Resolved Cloudflare credentials for API calls
+ */
+interface CloudflareCredentials {
+  accountId: string;
+  apiToken: string;
+}
+
+/**
+ * Resolve Cloudflare credentials from Secrets Store or plain strings
+ * Returns null if credentials are not configured
+ */
+async function resolveCloudflareCredentials(env: Env): Promise<CloudflareCredentials | null> {
+  if (!env.CF_ACCOUNT_ID || !env.CF_API_TOKEN) {
+    return null;
+  }
+
+  const [accountId, apiToken] = await Promise.all([
+    getSecret(env.CF_ACCOUNT_ID),
+    getSecret(env.CF_API_TOKEN),
+  ]);
+
+  if (!accountId || !apiToken) {
+    return null;
+  }
+
+  return { accountId, apiToken };
+}
+
+// Container image for tenant sandboxes - configurable via AGENT_IMAGE_TAG env var
+// Default: v1.0.0 - override by setting AGENT_IMAGE_TAG env var in wrangler.toml or secrets
+const DEFAULT_SANDBOX_IMAGE_TAG = 'v1.0.0';
+
+/**
+ * Get the sandbox image tag, allowing override via environment variable
+ */
+function getSandboxImageTag(env: Env): string {
+  // Support configurable image tag via env var or secret
+  return env.AGENT_IMAGE_TAG || DEFAULT_SANDBOX_IMAGE_TAG;
+}
+
+/**
+ * Get the full container image URL for sandboxes
+ */
+function getSandboxImageUrl(accountId: string, imageTag: string): string {
+  return `registry.cloudflare.com/${accountId}/maven-agent:${imageTag}`;
+}
+
+/**
+ * Validate that the container image exists in Cloudflare's registry
+ *
+ * Note: The Containers API may not be accessible via standard API tokens.
+ * This validation is best-effort - if it fails, we log a warning and continue.
+ * The deployment will fail with a clear error if the image doesn't exist.
+ *
+ * @param creds Cloudflare credentials
+ * @param imageTag The image tag to validate (e.g., "v1.0.0")
+ * @returns true if validated, false if validation was skipped
+ */
+export async function validateContainerImage(
+  creds: CloudflareCredentials,
+  imageTag: string
+): Promise<boolean> {
+  try {
+    const response = await fetch(
+      `${CF_API_BASE}/accounts/${creds.accountId}/containers/images`,
+      {
+        headers: { Authorization: `Bearer ${creds.apiToken}` },
+      }
+    );
+
+    const result = (await response.json()) as CloudflareApiResponse<Array<{ repository: string; tag: string }>>;
+
+    if (!result.success) {
+      // API not accessible - skip validation, deployment will fail if image missing
+      console.log(`Container image validation skipped: API returned ${JSON.stringify(result.errors)}`);
+      return false;
+    }
+
+    const requiredImage = `maven-agent:${imageTag}`;
+    const imageExists = result.result.some(
+      (img) => img.repository === 'maven-agent' && img.tag === imageTag
+    );
+
+    if (!imageExists) {
+      const availableTags = result.result
+        .filter((img) => img.repository === 'maven-agent')
+        .map((img) => img.tag)
+        .join(', ');
+
+      const hint = availableTags
+        ? `Available tags: ${availableTags}. Set AGENT_IMAGE_TAG env var or push the required version.`
+        : `No maven-agent images found. Run: ./scripts/push-agent.sh ${imageTag}`;
+
+      throw new Error(
+        `Container image "${requiredImage}" not found in registry. ${hint}`
+      );
+    }
+
+    return true;
+  } catch (err) {
+    // If it's our own error about missing image, rethrow
+    if (err instanceof Error && err.message.includes('not found in registry')) {
+      throw err;
+    }
+    // Otherwise skip validation
+    console.log(`Container image validation skipped: ${err}`);
+    return false;
+  }
+}
 
 // Types for Cloudflare API responses
 interface CloudflareApiResponse<T = unknown> {
@@ -59,7 +167,8 @@ export async function deployTenantWorker(
   tier: string,
   env: Env
 ): Promise<WorkerDeploymentResult> {
-  if (!env.CF_ACCOUNT_ID || !env.CF_API_TOKEN) {
+  const creds = await resolveCloudflareCredentials(env);
+  if (!creds) {
     throw new Error('Cloudflare credentials not configured (CF_ACCOUNT_ID, CF_API_TOKEN)');
   }
 
@@ -75,6 +184,13 @@ export async function deployTenantWorker(
   }
 
   // Pro and Enterprise get dedicated workers with full tenant-worker functionality
+
+  // Get image tag (configurable via AGENT_IMAGE_TAG env var)
+  const imageTag = getSandboxImageTag(env);
+
+  // Validate container image exists before proceeding
+  await validateContainerImage(creds, imageTag);
+
   // Fetch the pre-built tenant-worker bundle from R2
   const workerBundle = await fetchTenantWorkerBundle(env);
   if (!workerBundle) {
@@ -134,7 +250,7 @@ export async function deployTenantWorker(
     containers: [
       {
         class_name: 'Sandbox',
-        image: SANDBOX_IMAGE,
+        image: getSandboxImageUrl(creds.accountId, imageTag),
         instance_type: 'basic',
       },
     ],
@@ -150,11 +266,11 @@ export async function deployTenantWorker(
 
   // Deploy the worker
   const response = await fetch(
-    `${CF_API_BASE}/accounts/${env.CF_ACCOUNT_ID}/workers/scripts/${workerName}`,
+    `${CF_API_BASE}/accounts/${creds.accountId}/workers/scripts/${workerName}`,
     {
       method: 'PUT',
       headers: {
-        Authorization: `Bearer ${env.CF_API_TOKEN}`,
+        Authorization: `Bearer ${creds.apiToken}`,
       },
       body: formData,
     }
@@ -168,13 +284,13 @@ export async function deployTenantWorker(
   }
 
   // Enable workers.dev subdomain
-  await enableWorkerSubdomain(workerName, env);
+  await enableWorkerSubdomainWithCreds(workerName, creds);
 
   // Set secrets
-  await setWorkerSecrets(workerName, env);
+  await setWorkerSecretsWithCreds(workerName, creds, env);
 
   // Get the account's workers.dev subdomain
-  const subdomain = await getWorkersSubdomain(env);
+  const subdomain = await getWorkersSubdomainWithCreds(creds);
 
   return {
     workerName,
@@ -207,27 +323,35 @@ async function fetchTenantWorkerBundle(env: Env): Promise<string | null> {
 
 
 /**
- * Set worker secrets (JWT keys, API keys)
+ * Set worker secrets with pre-resolved credentials
  */
-async function setWorkerSecrets(workerName: string, env: Env): Promise<void> {
-  if (!env.CF_ACCOUNT_ID || !env.CF_API_TOKEN) return;
+async function setWorkerSecretsWithCreds(
+  workerName: string,
+  creds: CloudflareCredentials,
+  env: Env
+): Promise<void> {
+  // Resolve secrets from Secrets Store (production) or plain strings (local dev)
+  const [jwtPublicKey, internalApiKey] = await getSecrets([
+    env.JWT_PUBLIC_KEY,
+    env.INTERNAL_API_KEY,
+  ]);
 
   const secrets: Record<string, string> = {};
 
-  if (env.JWT_PUBLIC_KEY) {
-    secrets['JWT_PUBLIC_KEY'] = env.JWT_PUBLIC_KEY;
+  if (jwtPublicKey) {
+    secrets['JWT_PUBLIC_KEY'] = jwtPublicKey;
   }
-  if (env.INTERNAL_API_KEY) {
-    secrets['INTERNAL_API_KEY'] = env.INTERNAL_API_KEY;
+  if (internalApiKey) {
+    secrets['INTERNAL_API_KEY'] = internalApiKey;
   }
 
   for (const [name, value] of Object.entries(secrets)) {
     await fetch(
-      `${CF_API_BASE}/accounts/${env.CF_ACCOUNT_ID}/workers/scripts/${workerName}/secrets`,
+      `${CF_API_BASE}/accounts/${creds.accountId}/workers/scripts/${workerName}/secrets`,
       {
         method: 'PUT',
         headers: {
-          Authorization: `Bearer ${env.CF_API_TOKEN}`,
+          Authorization: `Bearer ${creds.apiToken}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ name, text: value, type: 'secret_text' }),
@@ -237,18 +361,14 @@ async function setWorkerSecrets(workerName: string, env: Env): Promise<void> {
 }
 
 /**
- * Get the account's workers.dev subdomain
+ * Get the account's workers.dev subdomain with pre-resolved credentials
  */
-async function getWorkersSubdomain(env: Env): Promise<string> {
-  if (!env.CF_ACCOUNT_ID || !env.CF_API_TOKEN) {
-    return 'tools-7b7';
-  }
-
+async function getWorkersSubdomainWithCreds(creds: CloudflareCredentials): Promise<string> {
   try {
     const response = await fetch(
-      `${CF_API_BASE}/accounts/${env.CF_ACCOUNT_ID}/workers/subdomain`,
+      `${CF_API_BASE}/accounts/${creds.accountId}/workers/subdomain`,
       {
-        headers: { Authorization: `Bearer ${env.CF_API_TOKEN}` },
+        headers: { Authorization: `Bearer ${creds.apiToken}` },
       }
     );
 
@@ -264,17 +384,18 @@ async function getWorkersSubdomain(env: Env): Promise<string> {
 }
 
 /**
- * Enable workers.dev subdomain for a worker
+ * Enable workers.dev subdomain for a worker with pre-resolved credentials
  */
-async function enableWorkerSubdomain(workerName: string, env: Env): Promise<void> {
-  if (!env.CF_ACCOUNT_ID || !env.CF_API_TOKEN) return;
-
+async function enableWorkerSubdomainWithCreds(
+  workerName: string,
+  creds: CloudflareCredentials
+): Promise<void> {
   await fetch(
-    `${CF_API_BASE}/accounts/${env.CF_ACCOUNT_ID}/workers/scripts/${workerName}/subdomain`,
+    `${CF_API_BASE}/accounts/${creds.accountId}/workers/scripts/${workerName}/subdomain`,
     {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${env.CF_API_TOKEN}`,
+        Authorization: `Bearer ${creds.apiToken}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ enabled: true }),
@@ -319,15 +440,16 @@ export async function stopAgentContainer(_tenantSlug: string, _env: Env): Promis
  * Delete a tenant's dedicated worker
  */
 export async function deleteTenantWorker(tenantSlug: string, env: Env): Promise<void> {
-  if (!env.CF_ACCOUNT_ID || !env.CF_API_TOKEN) {
+  const creds = await resolveCloudflareCredentials(env);
+  if (!creds) {
     throw new Error('Cloudflare credentials not configured');
   }
 
   const workerName = `maven-tenant-${tenantSlug}`;
 
-  await fetch(`${CF_API_BASE}/accounts/${env.CF_ACCOUNT_ID}/workers/scripts/${workerName}`, {
+  await fetch(`${CF_API_BASE}/accounts/${creds.accountId}/workers/scripts/${workerName}`, {
     method: 'DELETE',
-    headers: { Authorization: `Bearer ${env.CF_API_TOKEN}` },
+    headers: { Authorization: `Bearer ${creds.apiToken}` },
   });
 }
 
@@ -335,13 +457,14 @@ export async function deleteTenantWorker(tenantSlug: string, env: Env): Promise<
  * Check if a tenant worker exists
  */
 export async function tenantWorkerExists(tenantSlug: string, env: Env): Promise<boolean> {
-  if (!env.CF_ACCOUNT_ID || !env.CF_API_TOKEN) return false;
+  const creds = await resolveCloudflareCredentials(env);
+  if (!creds) return false;
 
   const workerName = `maven-tenant-${tenantSlug}`;
   const response = await fetch(
-    `${CF_API_BASE}/accounts/${env.CF_ACCOUNT_ID}/workers/scripts/${workerName}`,
+    `${CF_API_BASE}/accounts/${creds.accountId}/workers/scripts/${workerName}`,
     {
-      headers: { Authorization: `Bearer ${env.CF_API_TOKEN}` },
+      headers: { Authorization: `Bearer ${creds.apiToken}` },
     }
   );
 
@@ -357,17 +480,18 @@ export async function updateWorkerSecrets(
   secrets: Record<string, string>,
   env: Env
 ): Promise<void> {
-  if (!env.CF_ACCOUNT_ID || !env.CF_API_TOKEN) {
+  const creds = await resolveCloudflareCredentials(env);
+  if (!creds) {
     throw new Error('Cloudflare credentials not configured');
   }
 
   for (const [name, value] of Object.entries(secrets)) {
     await fetch(
-      `${CF_API_BASE}/accounts/${env.CF_ACCOUNT_ID}/workers/scripts/${workerName}/secrets`,
+      `${CF_API_BASE}/accounts/${creds.accountId}/workers/scripts/${workerName}/secrets`,
       {
         method: 'PUT',
         headers: {
-          Authorization: `Bearer ${env.CF_API_TOKEN}`,
+          Authorization: `Bearer ${creds.apiToken}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ name, text: value, type: 'secret_text' }),
@@ -383,13 +507,14 @@ export async function getWorkerStatus(
   tenantSlug: string,
   env: Env
 ): Promise<{ exists: boolean; status?: string; modifiedOn?: string }> {
-  if (!env.CF_ACCOUNT_ID || !env.CF_API_TOKEN) return { exists: false };
+  const creds = await resolveCloudflareCredentials(env);
+  if (!creds) return { exists: false };
 
   const workerName = `maven-tenant-${tenantSlug}`;
   const response = await fetch(
-    `${CF_API_BASE}/accounts/${env.CF_ACCOUNT_ID}/workers/scripts/${workerName}`,
+    `${CF_API_BASE}/accounts/${creds.accountId}/workers/scripts/${workerName}`,
     {
-      headers: { Authorization: `Bearer ${env.CF_API_TOKEN}` },
+      headers: { Authorization: `Bearer ${creds.apiToken}` },
     }
   );
 

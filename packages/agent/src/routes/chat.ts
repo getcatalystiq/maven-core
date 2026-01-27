@@ -32,8 +32,11 @@ app.post(
     const t0 = Date.now();
     const { message, sessionId, skills } = c.req.valid('json');
 
-    // Get context from headers
-    const tenantId = c.req.header('X-Tenant-Id') || 'default';
+    // Get context from headers (tenant required)
+    const tenantId = c.req.header('X-Tenant-Id');
+    if (!tenantId) {
+      return c.json({ error: 'X-Tenant-Id header is required' }, 400);
+    }
     const userId = c.req.header('X-User-Id') || 'anonymous';
     const userRoles = safeParseRoles(c.req.header('X-User-Roles'));
 
@@ -62,6 +65,7 @@ app.post(
         response: result.response,
         sessionId: result.sessionId,
         usage: result.usage,
+        timing: result.timing,
       });
     } catch (error) {
       console.error('Chat error:', error);

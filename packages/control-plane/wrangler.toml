@@ -1,0 +1,79 @@
+name = "maven-control-plane"
+main = "src/index.ts"
+compatibility_date = "2025-01-23"
+compatibility_flags = ["nodejs_compat"]
+
+# Enable observability
+[observability]
+enabled = true
+
+# D1 Database
+[[d1_databases]]
+binding = "DB"
+database_name = "maven"
+database_id = "dd2cac9f-8072-4791-bc0d-6befdc30782d"
+
+# KV Namespaces
+[[kv_namespaces]]
+binding = "KV"
+id = "5c9cee2d2257426b90100142a4a81053"
+
+# R2 Buckets
+[[r2_buckets]]
+binding = "FILES"
+bucket_name = "maven-files"
+
+# Environment variables
+[vars]
+JWT_ISSUER = "https://maven.example.com"
+JWT_KEY_ID = "maven-key-1"
+# Agent container image tag - update this when pushing new versions
+# Run: npx wrangler vars put AGENT_IMAGE_TAG --value "vX.Y.Z" --name maven-control-plane
+AGENT_IMAGE_TAG = "v1.3.3"
+
+# Cloudflare Secrets Store bindings (shared secrets across workers)
+# @see https://developers.cloudflare.com/secrets-store/
+# Store ID: 4f06aa96622946a4b336737a727e9354
+[[secrets_store_secrets]]
+binding = "JWT_PUBLIC_KEY"
+store_id = "4f06aa96622946a4b336737a727e9354"
+secret_name = "maven-jwt-public-key"
+
+[[secrets_store_secrets]]
+binding = "INTERNAL_API_KEY"
+store_id = "4f06aa96622946a4b336737a727e9354"
+secret_name = "maven-internal-api-key"
+
+[[secrets_store_secrets]]
+binding = "CF_ACCOUNT_ID"
+store_id = "4f06aa96622946a4b336737a727e9354"
+secret_name = "maven-cf-account-id"
+
+[[secrets_store_secrets]]
+binding = "CF_API_TOKEN"
+store_id = "4f06aa96622946a4b336737a727e9354"
+secret_name = "maven-cf-api-token"
+
+# Per-worker secrets (JWT_PRIVATE_KEY is too large for Secrets Store)
+# Set via: wrangler secret put JWT_PRIVATE_KEY
+
+# Local development server config
+[dev]
+port = 8787
+
+# Development configuration
+[env.development]
+name = "maven-control-plane-dev"
+
+# Production configuration
+[env.production]
+name = "maven-control-plane"
+
+[env.production.vars]
+JWT_ISSUER = "https://api.maven.example.com"
+# Agent container image for provisioning (override via wrangler secret put AGENT_IMAGE)
+# AGENT_IMAGE = "registry.cloudflare.com/YOUR_ACCOUNT_ID/maven-agent:latest"
+
+[[env.production.routes]]
+pattern = "api.maven.example.com/*"
+zone_name = "example.com"

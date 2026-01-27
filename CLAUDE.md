@@ -60,12 +60,23 @@ The `_migrations` table tracks which migrations have been applied.
 ### Tenant Worker (Cloudflare Worker)
 
 ```bash
-# Development server
-cd packages/tenant-worker && npm run dev  # Port 8788
-
-# Deploy to Cloudflare
+# Shared tenant worker (default)
+cd packages/tenant-worker && npm run dev     # Port 8788
 cd packages/tenant-worker && npm run deploy
+
+# Dedicated tenant deployments via CLI
+npm run tenant dev <slug>       # Local dev for specific tenant
+npm run tenant deploy <slug>    # Deploy dedicated tenant worker
+npm run tenant list             # List all tenants
+
+# Examples
+npm run tenant dev easycarnet
+npm run tenant deploy easycarnet --dry-run
 ```
+
+The tenant CLI fetches config from the control plane's `/internal/tenant/:slug` endpoint
+and injects tenant-specific vars via wrangler `--var` and `--name` flags. Config is
+cached in `packages/tenant-worker/.tenant-config/` for offline development.
 
 ### Agent (Docker Container)
 
@@ -190,6 +201,122 @@ Skills are stored in R2 with metadata in D1:
 Connectors (MCP servers) are stored in D1:
 - OAuth tokens stored in KV
 - Supports stdio, SSE, and HTTP MCP transports
+
+### Secrets Management (Cloudflare Secrets Store)
+
+Shared secrets use Cloudflare Secrets Store for centralized management across workers.
+
+**Local development:** Uses `.dev.vars` files with plain strings (created by `npm run setup`)
+
+**Production:** Uses Secrets Store bindings (async access via `get()` method)
+
+```typescript
+// Code works with both local dev (string) and production (SecretBinding)
+import { getSecret } from '@maven/shared';
+
+const publicKey = await getSecret(env.JWT_PUBLIC_KEY);
+```
+
+**Current setup:**
+
+| Secret | Source | control-plane | tenant-worker | maven-admin | maven-widget |
+|--------|--------|---------------|---------------|-------------|--------------|
+| `maven-jwt-public-key` | Secrets Store | ✅ | ✅ | ✅ | ✅ |
+| `maven-internal-api-key` | Secrets Store | ✅ | ✅ | ✅ | - |
+| `maven-cf-account-id` | Secrets Store | ✅ | - | - | - |
+| `maven-cf-api-token` | Secrets Store | ✅ | - | - | - |
+| `JWT_PRIVATE_KEY` | Per-worker | ✅ | - | - | - |
+
+Store ID: `4f06aa96622946a4b336737a727e9354`
+
+**Note:** JWT_PRIVATE_KEY exceeds Secrets Store size limit (~1.7KB > 1KB limit), so it remains a per-worker secret for control-plane only.
+
+### Tenant Provisioning
+
+Pro and Enterprise tier tenants get dedicated workers with Durable Objects and Sandbox containers.
+
+**Prerequisites for provisioning:**
+
+1. **Cloudflare credentials** in Secrets Store (control-plane needs these to deploy workers):
+   ```bash
+   # Add CF_ACCOUNT_ID
+   npx wrangler secrets-store secret create 4f06aa96622946a4b336737a727e9354 \
+     --name maven-cf-account-id --scopes workers --remote
+
+   # Add CF_API_TOKEN (needs Workers write permissions)
+   npx wrangler secrets-store secret create 4f06aa96622946a4b336737a727e9354 \
+     --name maven-cf-api-token --scopes workers --remote
+   ```
+
+2. **Container image** must exist in the registry:
+   ```bash
+   # Build and push agent container (uses cloudflare/sandbox base image)
+   ./scripts/push-agent.sh v1.0.0
+
+   # Verify image exists
+   npx wrangler containers images list
+   ```
+
+   The image tag used for provisioning is controlled by `AGENT_IMAGE_TAG` in
+   `packages/control-plane/wrangler.toml` (defaults to `v1.0.0`).
+
+   **Releasing a new agent version:**
+   ```bash
+   # 1. Build and push the new version
+   ./scripts/push-agent.sh v1.1.0
+
+   # 2. Update wrangler.toml with the new tag
+   # Edit packages/control-plane/wrangler.toml: AGENT_IMAGE_TAG = "v1.1.0"
+
+   # 3. Redeploy control-plane
+   cd packages/control-plane && npm run deploy
+   ```
+
+   New tenants will use the updated image. Existing tenants keep their
+   deployed version until their worker is redeployed.
+
+3. **Tenant worker bundle** in R2 (for dedicated worker deployments):
+   ```bash
+   # Build and upload tenant-worker bundle
+   cd packages/tenant-worker && npm run build
+   npx wrangler r2 object put maven-files/bundles/tenant-worker.js \
+     --file dist/index.js --remote
+   ```
+
+**Provision a tenant via API:**
+
+```bash
+# Get admin JWT token, then:
+curl -X POST https://maven-control-plane.tools-7b7.workers.dev/admin/tenants/provision \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"TenantName","slug":"tenant-slug","tier":"pro"}'
+
+# Check provisioning status
+curl https://maven-control-plane.tools-7b7.workers.dev/admin/tenants/provision/$JOB_ID \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+**What gets created for pro/enterprise tiers:**
+- D1 tenant record with settings
+- Dedicated worker: `maven-tenant-{slug}`
+- Worker secrets (JWT_PUBLIC_KEY, INTERNAL_API_KEY)
+- Sandbox container configuration
+
+**Adding secrets for new projects (maven-admin, maven-widget):**
+
+```toml
+# In wrangler.toml
+[[secrets_store_secrets]]
+binding = "JWT_PUBLIC_KEY"
+store_id = "4f06aa96622946a4b336737a727e9354"
+secret_name = "maven-jwt-public-key"
+
+[[secrets_store_secrets]]
+binding = "INTERNAL_API_KEY"
+store_id = "4f06aa96622946a4b336737a727e9354"
+secret_name = "maven-internal-api-key"
+```
 
 ### Development Setup
 

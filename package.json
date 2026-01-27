@@ -1,0 +1,36 @@
+{
+  "name": "maven-core-ts",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "dev:start": "./scripts/dev.sh start",
+    "dev:stop": "./scripts/dev.sh stop",
+    "dev:restart": "./scripts/dev.sh restart",
+    "dev:status": "./scripts/dev.sh status",
+    "dev:logs": "./scripts/dev.sh logs",
+    "test": "turbo run test",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "setup": "./scripts/setup-dev.sh",
+    "migrate": "./scripts/migrate.sh up",
+    "migrate:status": "./scripts/migrate.sh status",
+    "migrate:remote": "./scripts/migrate.sh up --remote",
+    "migrate:create": "./scripts/migrate.sh create",
+    "create-super-admin": "./scripts/create-super-admin.sh",
+    "push:agent": "./scripts/push-agent.sh",
+    "tenant": "./scripts/tenant.sh"
+  },
+  "devDependencies": {
+    "turbo": "^2.3.0",
+    "typescript": "^5.7.0",
+    "wrangler": "^4.60.0"
+  },
+  "packageManager": "npm@10.8.0",
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

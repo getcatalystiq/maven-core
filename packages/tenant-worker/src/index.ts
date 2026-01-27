@@ -15,6 +15,7 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
 import { secureHeaders } from 'hono/secure-headers';
+import type { Secret } from '@maven/shared';
 import { jwtAuth } from './middleware/auth';
 import { TenantAgent } from './durable-objects/tenant-agent';
 import { Sandbox } from '@cloudflare/sandbox';
@@ -29,14 +30,18 @@ export interface Env {
 
   // JWT Configuration
   JWT_ISSUER: string;
-  JWT_PUBLIC_KEY: string;
+
+  // Secrets (Secrets Store in production, plain strings in local dev)
+  // @see https://developers.cloudflare.com/secrets-store/
+  JWT_PUBLIC_KEY: Secret;
+  INTERNAL_API_KEY: Secret;
 
   // Control Plane URL for fetching config
   CONTROL_PLANE_URL: string;
-  INTERNAL_API_KEY: string;
 
   // Claude/Anthropic configuration
   ANTHROPIC_API_KEY?: string;
+  ANTHROPIC_MODEL?: string; // Override default model (e.g., 'us.anthropic.claude-sonnet-4-20250514-v1:0')
 
   // AWS Bedrock configuration (alternative to Anthropic API)
   AWS_ACCESS_KEY_ID?: string;
@@ -70,28 +75,38 @@ app.use('*', secureHeaders());
 // CORS middleware with configurable origins
 app.use('*', async (c, next) => {
   const allowedOriginsStr = c.env.CORS_ALLOWED_ORIGINS || '';
+  const requestOrigin = c.req.header('Origin') || '*';
 
   let origin: string | string[] | ((origin: string) => string | undefined | null);
+  let allowCredentials = false;
 
   if (!allowedOriginsStr || allowedOriginsStr === '*') {
-    origin = '*';
+    // When no specific origins configured, reflect the request origin to allow credentials
+    origin = requestOrigin;
+    allowCredentials = true;
   } else {
     const allowedOrigins = allowedOriginsStr.split(',').map((o) => o.trim()).filter(Boolean);
-    origin = (requestOrigin: string) => {
-      if (allowedOrigins.includes(requestOrigin)) {
-        return requestOrigin;
+    origin = (reqOrigin: string) => {
+      if (allowedOrigins.includes(reqOrigin)) {
+        return reqOrigin;
       }
       return null;
     };
+    allowCredentials = true;
   }
 
   const corsMiddleware = cors({
     origin,
     allowMethods: ['GET', 'POST', 'OPTIONS'],
-    allowHeaders: ['Content-Type', 'Authorization', 'X-Tenant-Id'],
+    allowHeaders: [
+      'Content-Type',
+      'Authorization',
+      'X-Tenant-Id',
+      'x-amzn-bedrock-agentcore-runtime-custom-authorization',
+    ],
     exposeHeaders: ['X-Request-Id'],
     maxAge: 86400,
-    credentials: allowedOriginsStr !== '*' && allowedOriginsStr !== '',
+    credentials: allowCredentials,
   });
 
   return corsMiddleware(c, next);
@@ -194,17 +209,71 @@ app.post('/chat/invocations', async (c) => {
 // Session listing
 app.get('/sessions', async (c) => {
   const tenantId = c.get('tenantId');
+  const userId = c.get('userId');
+  const roles = c.get('roles');
+
   const agentId = c.env.TENANT_AGENT.idFromName(`tenant-${tenantId}`);
   const agent = c.env.TENANT_AGENT.get(agentId);
-  return agent.fetch(c.req.raw);
+
+  const request = new Request(c.req.url, {
+    method: 'GET',
+    headers: {
+      'X-User-Id': userId,
+      'X-Tenant-Id': tenantId,
+      'X-User-Roles': JSON.stringify(roles),
+    },
+  });
+
+  return agent.fetch(request);
 });
 
 // Get specific session
 app.get('/sessions/:id', async (c) => {
   const tenantId = c.get('tenantId');
+  const userId = c.get('userId');
+  const roles = c.get('roles');
+
   const agentId = c.env.TENANT_AGENT.idFromName(`tenant-${tenantId}`);
   const agent = c.env.TENANT_AGENT.get(agentId);
-  return agent.fetch(c.req.raw);
+
+  const request = new Request(c.req.url, {
+    method: 'GET',
+    headers: {
+      'X-User-Id': userId,
+      'X-Tenant-Id': tenantId,
+      'X-User-Roles': JSON.stringify(roles),
+    },
+  });
+
+  return agent.fetch(request);
+});
+
+// WebSocket chat endpoint for real-time streaming
+// This uses wsConnect() to properly proxy WebSocket connections to the container
+app.get('/ws/chat', jwtAuth, async (c) => {
+  const upgradeHeader = c.req.header('Upgrade');
+  if (upgradeHeader?.toLowerCase() !== 'websocket') {
+    return c.text('Expected WebSocket upgrade', 426);
+  }
+
+  const tenantId = c.get('tenantId');
+  const userId = c.get('userId');
+
+  const agentId = c.env.TENANT_AGENT.idFromName(`tenant-${tenantId}`);
+  const agent = c.env.TENANT_AGENT.get(agentId);
+
+  // Forward the WebSocket upgrade request to the DO
+  const request = new Request(c.req.url, {
+    method: 'GET',
+    headers: {
+      'Upgrade': 'websocket',
+      'Connection': 'Upgrade',
+      'X-User-Id': userId,
+      'X-Tenant-Id': tenantId,
+    },
+  });
+
+  return agent.fetch(request);
 });
 
 // 404 handler
