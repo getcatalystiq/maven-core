@@ -27,7 +27,7 @@ new_sqlite_classes = ["Sandbox"]
 # Container for agent sandbox
 [[containers]]
 class_name = "Sandbox"
-image = "registry.cloudflare.com/7b7fb01e095cae40c829f948caa48f54/maven-agent:v1.3.4"
+image = "registry.cloudflare.com/7b7fb01e095cae40c829f948caa48f54/maven-agent:v2.0.1"
 instance_type = "basic"
 
 [vars]

@@ -1,14 +1,18 @@
 /**
- * Streaming chat route handler
- * Uses Streamable HTTP (NDJSON) per MCP 2025 spec
+ * Streaming chat route handler - V2 Session Manager
  *
- * Uses the same chat() generator as the main agent for reliable streaming.
+ * Uses the V2 Session API for warm starts (~2-3s) after the first cold start (~10s).
+ * Sessions are kept alive and reused for subsequent messages.
  */
 
 import { Hono } from 'hono';
 import { zValidator } from '@hono/zod-validator';
 import { chatRequestSchema } from '@maven/shared';
-import { chat, type TimingEvent } from '../agent';
+import {
+  getOrCreateSession,
+  sendMessage,
+  getSessionStats,
+} from '../session-manager';
 
 const app = new Hono();
 
@@ -36,11 +40,13 @@ function ndjsonLine(data: unknown): string {
 }
 
 /**
- * Stats endpoint
+ * Stats endpoint - shows session manager statistics
  */
 app.get('/stats', (c) => {
+  const stats = getSessionStats();
   return c.json({
-    version: 'v1.3.4-fixed-streaming',
+    version: 'v2.0.0-session-manager',
+    ...stats,
   });
 });
 
@@ -53,7 +59,7 @@ app.post(
 
     console.log(`[STREAM] T+${t()}ms: Request received`);
 
-    const { message, sessionId: requestedSessionId, skills } = c.req.valid('json');
+    const { message, sessionId: requestedSessionId } = c.req.valid('json');
 
     // Get context from headers (tenant required)
     const tenantId = c.req.header('X-Tenant-Id');
@@ -77,37 +83,55 @@ app.post(
         let receivedResult = false;
         let firstMsgTime: number | null = null;
 
-        // Emit start event immediately to reduce TTFB
-        controller.enqueue(
-          encoder.encode(ndjsonLine({ type: 'start', sessionId }))
-        );
-        console.log(`[STREAM] T+${t()}ms: Emitted start event`);
-
         try {
-          console.log(`[STREAM] T+${t()}ms: Calling chat() function`);
-
-          // Use the working chat() generator from agent.ts
-          for await (const msg of chat(message, {
+          // Get or create session (warm path is instant, cold path creates SDK session)
+          console.log(`[STREAM] T+${t()}ms: Getting/creating session...`);
+          const session = await getOrCreateSession(
             sessionId,
             tenantId,
             userId,
-            userRoles,
-            skills,
-          })) {
+            userRoles
+          );
+
+          const isWarm = session.messageCount > 0;
+          const sessionInfoTime = t();
+          console.log(`[STREAM] T+${sessionInfoTime}ms: Session ready (warm=${isWarm}, msgCount=${session.messageCount})`);
+
+          // Emit session info event - includes warm status for client telemetry
+          controller.enqueue(
+            encoder.encode(ndjsonLine({
+              type: 'session_info',
+              sessionId: session.id,
+              isWarm,
+              messageCount: session.messageCount,
+              timing: {
+                sessionReadyMs: sessionInfoTime,
+              },
+            }))
+          );
+
+          // Emit start event
+          controller.enqueue(
+            encoder.encode(ndjsonLine({ type: 'start', sessionId }))
+          );
+          console.log(`[STREAM] T+${t()}ms: Emitted start event`);
+
+          // Send message and stream responses
+          console.log(`[STREAM] T+${t()}ms: Sending message to session...`);
+
+          for await (const msg of sendMessage(session, message)) {
             if (!firstMsgTime) {
               firstMsgTime = t();
-              console.log(`[STREAM] T+${firstMsgTime}ms: First message from Claude SDK (type: ${msg.type})`);
+              console.log(`[STREAM] T+${firstMsgTime}ms: First message from SDK (type: ${msg.type})`);
             }
 
-            // Handle timing events (custom type from chat())
-            if (msg.type === 'timing') {
-              const timing = msg as TimingEvent;
+            // Handle different message types
+            if (msg.type === 'system') {
+              // System init message - emit for debugging
               controller.enqueue(
                 encoder.encode(ndjsonLine({
-                  type: 'timing',
-                  phase: timing.phase,
-                  ms: timing.ms,
-                  details: timing.details,
+                  type: 'system',
+                  subtype: 'subtype' in msg ? msg.subtype : 'unknown',
                 }))
               );
             } else if (msg.type === 'stream_event') {
@@ -115,11 +139,19 @@ app.post(
                 encoder.encode(ndjsonLine({ ...msg, type: 'stream' }))
               );
             } else if (msg.type === 'assistant') {
-              // Extract text for immediate display
+              // Extract text and emit in format widget expects
+              // Widget expects: {"type":"stream","event":{"type":"content_block_delta","delta":{"text":"..."}}}
               for (const block of msg.message.content) {
                 if (block.type === 'text') {
+                  // Emit as stream event for widget compatibility
                   controller.enqueue(
-                    encoder.encode(ndjsonLine({ type: 'content', text: block.text }))
+                    encoder.encode(ndjsonLine({
+                      type: 'stream',
+                      event: {
+                        type: 'content_block_delta',
+                        delta: { text: block.text },
+                      },
+                    }))
                   );
                 } else if (block.type === 'tool_use') {
                   controller.enqueue(
@@ -141,6 +173,7 @@ app.post(
                   ndjsonLine({
                     type: 'done',
                     sessionId: msg.session_id || sessionId,
+                    isWarm,
                     usage: {
                       inputTokens: msg.usage.input_tokens,
                       outputTokens: msg.usage.output_tokens,
@@ -155,7 +188,7 @@ app.post(
             }
           }
 
-          console.log(`[STREAM] T+${t()}ms: Chat loop completed`);
+          console.log(`[STREAM] T+${t()}ms: Message loop completed`);
         } catch (error) {
           const errorMessage = (error as Error).message;
           // Ignore "exit code 1" errors if we already received a result
