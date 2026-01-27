@@ -60,10 +60,10 @@ export const adminAuth = createMiddleware<{ Bindings: Env; Variables: Variables 
       throw new HTTPException(403, { message: 'Admin access required' });
     }
 
-    // Super-admin can override tenant from query param
+    // Super-admin can override tenant from query param or header
     if (isSuperAdmin) {
       c.set('isSuperAdmin', true);
-      const overrideTenant = c.req.query('tenantId');
+      const overrideTenant = c.req.query('tenantId') || c.req.header('X-Tenant-Id');
       if (overrideTenant) {
         c.set('tenantId', overrideTenant);
       }
