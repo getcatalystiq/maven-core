@@ -25,6 +25,15 @@ interface SandboxConfig {
   connectors: Array<{ name: string; type: string; config: unknown }>;
 }
 
+interface LogEntry {
+  ts: string;
+  level: 'info' | 'warn' | 'error';
+  msg: string;
+  tenant?: string;
+  session?: string;
+  context?: Record<string, unknown>;
+}
+
 interface ProcessInfo {
   pid: number;
   running: boolean;
@@ -37,6 +46,14 @@ export class TenantAgent extends DurableObject<Env> {
   private cachedConfig: SandboxConfig | null = null;
   private configCacheTime: number = 0;
   private static readonly CONFIG_CACHE_TTL_MS = 60000; // 60 seconds
+
+  // Log buffering
+  private logBuffer: LogEntry[] = [];
+  private lastLogOffset: number = 0; // Track how many log lines we've already read
+  private static readonly LOG_BUFFER_MAX = 100;
+  private static readonly LOG_FLUSH_INTERVAL_MS = 10000; // 10 seconds
+  private static readonly LOG_RETENTION_DAYS = 7;
+  private static readonly AGENT_LOG_FILE = '/tmp/agent.log';
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -53,15 +70,24 @@ export class TenantAgent extends DurableObject<Env> {
       return this.jsonResponse({ error: 'Missing user context' }, 400);
     }
 
-    // Update last activity and set alarm for idle cleanup (30 minutes)
+    // Store tenant ID for alarm access and update last activity
+    await this.ctx.storage.put('tenantId', tenantId);
     await this.ctx.storage.put('lastActivity', Date.now());
-    await this.ctx.storage.setAlarm(Date.now() + 30 * 60 * 1000);
+    const alarmInterval = this.agentProcess?.running
+      ? TenantAgent.LOG_FLUSH_INTERVAL_MS
+      : 30 * 60 * 1000;
+    await this.ctx.storage.setAlarm(Date.now() + alarmInterval);
 
     // Route requests
     // Check for WebSocket upgrade first
     const upgradeHeader = request.headers.get('Upgrade');
     if (upgradeHeader?.toLowerCase() === 'websocket') {
       return this.handleWebSocketChat(request, tenantId, userId);
+    }
+
+    // Log ingestion endpoint (from agent container)
+    if (url.pathname.endsWith('/logs') && request.method === 'POST') {
+      return this.handleLogIngestion(request, tenantId);
     }
 
     if (url.pathname.endsWith('/chat/stream')) {
@@ -139,24 +165,33 @@ export class TenantAgent extends DurableObject<Env> {
   /**
    * Inject skills and configuration into the sandbox
    * Uses parallel writes to save 100-200ms with 3+ skills
+   *
+   * Skills are injected to ~/.claude/skills/ (native Claude Code location)
+   * so the SDK can load them automatically via settingSources: ['user']
    */
   private async injectConfiguration(config: SandboxConfig): Promise<void> {
     if (!this.sandbox) return;
 
-    // Create skills and config directories in parallel
+    // Native Claude Code skills path (~/.claude/skills/)
+    // Agent runs as 'maven' user with HOME=/home/maven
+    const CLAUDE_SKILLS_PATH = '/home/maven/.claude/skills';
+    const CLAUDE_CONFIG_PATH = '/home/maven/.claude';
+
+    // Create Claude config and skills directories in parallel
     await Promise.all([
-      this.sandbox.mkdir('/app/skills', { recursive: true }),
+      this.sandbox.mkdir(CLAUDE_SKILLS_PATH, { recursive: true }),
       this.sandbox.mkdir('/app/config', { recursive: true }),
     ]);
 
-    // Write all skills in parallel (saves 100-200ms with 3+ skills)
+    // Write all skills to native Claude location in parallel
     const skillWrites = config.skills
       .filter(skill => skill.content)
       .map(async (skill) => {
-        const skillPath = `/app/skills/${skill.name}/SKILL.md`;
-        await this.sandbox!.mkdir(`/app/skills/${skill.name}`, { recursive: true });
+        const skillDir = `${CLAUDE_SKILLS_PATH}/${skill.name}`;
+        const skillPath = `${skillDir}/SKILL.md`;
+        await this.sandbox!.mkdir(skillDir, { recursive: true });
         await this.sandbox!.writeFile(skillPath, skill.content!);
-        console.log(`Injected skill: ${skill.name}`);
+        console.log(`Injected skill to native location: ${skill.name}`);
       });
 
     // Write connectors configuration in parallel with skills
@@ -167,7 +202,16 @@ export class TenantAgent extends DurableObject<Env> {
       console.log(`Injected ${config.connectors.length} connectors`);
     });
 
-    await Promise.all([...skillWrites, connectorWrite]);
+    // Ensure a minimal settings.json exists for the SDK
+    // This enables native skill loading without any extra configuration
+    const settingsWrite = this.sandbox.writeFile(
+      `${CLAUDE_CONFIG_PATH}/settings.json`,
+      JSON.stringify({}, null, 2)
+    ).then(() => {
+      console.log('Created ~/.claude/settings.json');
+    });
+
+    await Promise.all([...skillWrites, connectorWrite, settingsWrite]);
   }
 
 
@@ -219,7 +263,9 @@ export class TenantAgent extends DurableObject<Env> {
       PATH: '/home/maven/.bun/bin:/usr/local/bin:/usr/bin:/bin',
       TENANT_ID: config.tenantId,
       USER_ID: config.userId,
-      SKILLS_PATH: '/app/skills',
+      // Native Claude Code skills location - SDK loads these via settingSources: ['user']
+      // Agent runs as 'maven' user with HOME=/home/maven
+      SKILLS_PATH: '/home/maven/.claude/skills',
       CONNECTORS_CONFIG: JSON.stringify(config.connectors),
       PORT: '8080',
     };
@@ -282,6 +328,9 @@ export class TenantAgent extends DurableObject<Env> {
     console.log(`[TIMING] T+${t()}ms: Waiting for agent to be ready`);
     await this.waitForServer();
     console.log(`[TIMING] T+${t()}ms: Agent HTTP server is ready`);
+
+    // Schedule log flush alarm now that agent is running
+    await this.ctx.storage.setAlarm(Date.now() + TenantAgent.LOG_FLUSH_INTERVAL_MS);
   }
 
   /**
@@ -763,6 +812,217 @@ export class TenantAgent extends DurableObject<Env> {
   }
 
   /**
+   * Handle log ingestion from agent container (push model)
+   *
+   * Receives batched log entries and buffers them in memory.
+   * Flushes to R2 when buffer is full or on periodic alarm.
+   *
+   * Note: This is for future use when we have container-to-DO callback.
+   * Currently, we use the pull model (pullLogsFromContainer).
+   */
+  private async handleLogIngestion(
+    request: Request,
+    tenantId: string
+  ): Promise<Response> {
+    try {
+      const body = (await request.json()) as { entries: LogEntry[] };
+
+      if (!body.entries || !Array.isArray(body.entries)) {
+        return this.jsonResponse({ error: 'Invalid log payload' }, 400);
+      }
+
+      // Add entries to buffer
+      for (const entry of body.entries) {
+        // Ensure tenant ID is set
+        entry.tenant = entry.tenant || tenantId;
+        this.logBuffer.push(entry);
+      }
+
+      // Flush if buffer is full
+      if (this.logBuffer.length >= TenantAgent.LOG_BUFFER_MAX) {
+        await this.flushLogs(tenantId);
+      } else {
+        // Schedule flush alarm if not already set
+        const alarmTime = await this.ctx.storage.getAlarm();
+        if (!alarmTime) {
+          await this.ctx.storage.setAlarm(Date.now() + TenantAgent.LOG_FLUSH_INTERVAL_MS);
+        }
+      }
+
+      return this.jsonResponse({ received: body.entries.length });
+    } catch (error) {
+      console.error('Log ingestion error:', error);
+      return this.jsonResponse({ error: 'Log ingestion failed' }, 500);
+    }
+  }
+
+  /**
+   * Pull logs from the agent container's log file (pull model)
+   *
+   * Reads new lines from /tmp/agent.log since last read.
+   * Parses each line and adds to buffer.
+   */
+  private async pullLogsFromContainer(tenantId: string): Promise<void> {
+    if (!this.sandbox) {
+      console.log('[PullLogs] No sandbox available');
+      return;
+    }
+
+    try {
+      // First check if the log file exists and get its size
+      const fileCheck = await this.sandbox.exec(
+        `wc -l ${TenantAgent.AGENT_LOG_FILE} 2>/dev/null || echo "0"`
+      );
+      const totalLines = parseInt(fileCheck.stdout?.trim().split(' ')[0] || '0', 10);
+      console.log(`[PullLogs] Log file has ${totalLines} lines, offset: ${this.lastLogOffset}`);
+
+      if (totalLines <= this.lastLogOffset) {
+        console.log('[PullLogs] No new lines to read');
+        return;
+      }
+
+      // Use tail with line offset to get only new lines
+      // The agent writes structured output prefixed with [TIMING], [WS], etc.
+      const result = await this.sandbox.exec(
+        `tail -n +${this.lastLogOffset + 1} ${TenantAgent.AGENT_LOG_FILE} 2>/dev/null | head -200`
+      );
+
+      if (!result.stdout) {
+        console.log('[PullLogs] No stdout from tail command');
+        return;
+      }
+
+      const lines = result.stdout.split('\n').filter((line) => line.trim());
+      if (lines.length === 0) {
+        console.log('[PullLogs] No non-empty lines found');
+        return;
+      }
+
+      console.log(`[PullLogs] Read ${lines.length} new log lines`);
+
+      // Update offset
+      this.lastLogOffset += lines.length;
+
+      // Parse log lines into structured entries
+      const now = new Date().toISOString();
+      for (const line of lines) {
+        // Detect log level from common prefixes
+        let level: 'info' | 'warn' | 'error' = 'info';
+        if (line.toLowerCase().includes('error') || line.toLowerCase().includes('fail')) {
+          level = 'error';
+        } else if (line.toLowerCase().includes('warn')) {
+          level = 'warn';
+        }
+
+        const entry: LogEntry = {
+          ts: now,
+          level,
+          msg: line,
+          tenant: tenantId,
+        };
+
+        this.logBuffer.push(entry);
+      }
+
+      console.log(`[PullLogs] Buffer now has ${this.logBuffer.length} entries`);
+
+      // Flush if buffer is full
+      if (this.logBuffer.length >= TenantAgent.LOG_BUFFER_MAX) {
+        console.log('[PullLogs] Buffer full, flushing');
+        await this.flushLogs(tenantId);
+      }
+    } catch (error) {
+      // Container may not be running, log error for debugging
+      console.log('[PullLogs] Failed to pull logs from container:', error);
+    }
+  }
+
+  /**
+   * Flush buffered logs to R2
+   *
+   * Writes logs as NDJSON files organized by tenant and date:
+   * logs/{tenantId}/{date}/{timestamp}.ndjson
+   */
+  private async flushLogs(tenantId: string): Promise<void> {
+    if (this.logBuffer.length === 0) {
+      return;
+    }
+
+    // Check if LOGS binding is available
+    if (!this.env.LOGS) {
+      console.warn('LOGS R2 binding not available, discarding logs');
+      this.logBuffer = [];
+      return;
+    }
+
+    const entries = this.logBuffer;
+    this.logBuffer = [];
+
+    // Build NDJSON content
+    const ndjson = entries.map((e) => JSON.stringify(e)).join('\n') + '\n';
+
+    // Generate path: logs/{tenantId}/{date}/{timestamp}.ndjson
+    const now = new Date();
+    const date = now.toISOString().split('T')[0]; // YYYY-MM-DD
+    const timestamp = now.getTime();
+    const path = `logs/${tenantId}/${date}/${timestamp}.ndjson`;
+
+    try {
+      await this.env.LOGS.put(path, ndjson, {
+        httpMetadata: {
+          contentType: 'application/x-ndjson',
+        },
+        customMetadata: {
+          tenantId,
+          entryCount: entries.length.toString(),
+        },
+      });
+      console.log(`Flushed ${entries.length} log entries to ${path}`);
+    } catch (error) {
+      console.error('Failed to write logs to R2:', error);
+      // Logs are lost at this point - we can't buffer indefinitely
+    }
+  }
+
+  /**
+   * Cleanup old logs (7 day retention)
+   */
+  private async cleanupOldLogs(tenantId: string): Promise<void> {
+    if (!this.env.LOGS) {
+      return;
+    }
+
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - TenantAgent.LOG_RETENTION_DAYS);
+
+    try {
+      // List log files for this tenant
+      const prefix = `logs/${tenantId}/`;
+      const listed = await this.env.LOGS.list({ prefix, limit: 1000 });
+
+      const deletePromises: Promise<void>[] = [];
+      for (const obj of listed.objects) {
+        // Extract date from path: logs/{tenantId}/{date}/{timestamp}.ndjson
+        const parts = obj.key.split('/');
+        if (parts.length >= 3) {
+          const dateStr = parts[2];
+          const logDate = new Date(dateStr);
+          if (logDate < cutoffDate) {
+            deletePromises.push(this.env.LOGS.delete(obj.key));
+          }
+        }
+      }
+
+      if (deletePromises.length > 0) {
+        await Promise.all(deletePromises);
+        console.log(`Deleted ${deletePromises.length} old log files for tenant ${tenantId}`);
+      }
+    } catch (error) {
+      console.error('Failed to cleanup old logs:', error);
+    }
+  }
+
+  /**
    * Fetch sandbox configuration from Control Plane internal API
    */
   private async fetchSandboxConfig(tenantId: string, userId: string): Promise<SandboxConfig> {
@@ -850,23 +1110,74 @@ export class TenantAgent extends DurableObject<Env> {
   }
 
   /**
-   * Cleanup idle sandbox
+   * Cleanup idle sandbox and flush logs
    */
   async alarm(): Promise<void> {
+    console.log('[Alarm] Starting alarm handler');
+
     const lastActivity = (await this.ctx.storage.get<number>('lastActivity')) || 0;
     const idleTime = Date.now() - lastActivity;
     const idleThreshold = 30 * 60 * 1000; // 30 minutes
 
-    if (idleTime > idleThreshold && this.sandbox) {
+    // Extract tenant ID from DO name
+    // The DO ID is a hex string, but we stored the tenant ID in storage during fetch
+    // Fall back to DO ID if not found
+    let tenantId = await this.ctx.storage.get<string>('tenantId');
+    if (!tenantId) {
+      // Try to extract from the DO name pattern
+      const doId = this.ctx.id.toString();
+      tenantId = doId.startsWith('tenant-') ? doId.substring(7) : doId;
+      console.log(`[Alarm] No stored tenantId, extracted from DO ID: ${tenantId}`);
+    }
+
+    console.log(`[Alarm] Tenant: ${tenantId}, idleTime: ${idleTime}ms, hasBufferedLogs: ${this.logBuffer.length}`);
+
+    // Reconnect to sandbox if we lost the reference (DO evicted and rehydrated)
+    // This is needed because in-memory state doesn't persist across DO evictions
+    if (!this.sandbox) {
+      const sleepAfter = this.env.SANDBOX_SLEEP_AFTER || '10m';
+      this.sandbox = getSandbox(this.env.Sandbox, `tenant-${tenantId}`, {
+        sleepAfter,
+      });
+      console.log('[Alarm] Reconnected to sandbox for log pull');
+    }
+
+    // Try to pull logs from container (will silently fail if container not running)
+    await this.pullLogsFromContainer(tenantId);
+
+    // Flush any pending logs to R2
+    if (this.logBuffer.length > 0) {
+      await this.flushLogs(tenantId);
+    }
+
+    if (idleTime > idleThreshold) {
       console.log(`Cleaning up idle sandbox for tenant DO: ${this.ctx.id.toString()}`);
+
+      // Final log pull before destroying
+      await this.pullLogsFromContainer(tenantId);
+      if (this.logBuffer.length > 0) {
+        await this.flushLogs(tenantId);
+      }
+
       // Destroy the sandbox to free resources
-      await this.sandbox.destroy();
+      if (this.sandbox) {
+        await this.sandbox.destroy();
+      }
       this.sandbox = null;
       this.configHash = null;
       this.agentProcess = null;
+      this.lastLogOffset = 0; // Reset log offset for next sandbox
+
+      // Run log cleanup on idle (once per day is sufficient)
+      await this.cleanupOldLogs(tenantId);
     } else {
-      // Schedule next check
-      await this.ctx.storage.setAlarm(Date.now() + idleThreshold);
+      // Schedule next alarm - always use log flush interval when we have activity
+      // since we need to pull logs periodically
+      const nextAlarm = idleTime < 5 * 60 * 1000  // Last activity within 5 minutes
+        ? TenantAgent.LOG_FLUSH_INTERVAL_MS
+        : idleThreshold - idleTime + 1000; // Wake up when idle threshold reached
+      await this.ctx.storage.setAlarm(Date.now() + nextAlarm);
+      console.log(`[Alarm] Scheduled next alarm in ${nextAlarm}ms (idle: ${idleTime}ms)`);
     }
   }
 

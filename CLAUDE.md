@@ -202,6 +202,78 @@ Connectors (MCP servers) are stored in D1:
 - OAuth tokens stored in KV
 - Supports stdio, SSE, and HTTP MCP transports
 
+### Agent Container Logs
+
+Agent containers write structured logs that are collected by the Durable Object and stored in R2 for observability and debugging.
+
+**How it works:**
+
+1. Agent writes logs to stdout (redirected to `/tmp/agent.log` in the container)
+2. The TenantAgent DO periodically pulls new log lines from the container
+3. Logs are buffered in memory (max 100 entries or 10 seconds)
+4. Buffered logs are written to R2 as NDJSON files
+5. Automatic 7-day retention cleanup
+
+**Log storage format:**
+
+Logs are stored at: `logs/{tenantId}/{YYYY-MM-DD}/{timestamp}.ndjson`
+
+Each line contains a structured log entry:
+```json
+{"ts":"2026-01-27T10:15:30.123Z","level":"info","msg":"[TIMING] T+50ms: Agent started","tenant":"abc123"}
+```
+
+**Querying logs via Admin API:**
+
+```bash
+# List available log files for a tenant
+curl "http://localhost:8787/admin/logs?tenantId=TENANT_ID&since=2026-01-01&limit=50" \
+  -H "Authorization: Bearer $TOKEN"
+
+# Read a specific log file
+curl "http://localhost:8787/admin/logs/TENANT_ID/2026-01-27/1706345678123.ndjson" \
+  -H "Authorization: Bearer $TOKEN"
+
+# Search logs with filters
+curl "http://localhost:8787/admin/logs/search?tenantId=TENANT_ID&query=error&level=error" \
+  -H "Authorization: Bearer $TOKEN"
+
+# Delete old logs (super admin only)
+curl -X DELETE "http://localhost:8787/admin/logs?tenantId=TENANT_ID&before=2026-01-20" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+**Query parameters:**
+
+| Parameter | Description |
+|-----------|-------------|
+| `tenantId` | Required. The tenant ID to query logs for |
+| `since` | Filter logs after this date (YYYY-MM-DD) |
+| `until` | Filter logs before this date (YYYY-MM-DD) |
+| `limit` | Maximum number of results (default: 100) |
+| `query` | Text search in log messages |
+| `level` | Filter by level: `info`, `warn`, `error` |
+| `sessionId` | Filter by chat session ID |
+
+**Access control:**
+- Super admins can view logs for any tenant
+- Regular admins can only view their own tenant's logs
+- Only super admins can delete logs
+
+**Checking logs via R2 directly:**
+
+```bash
+# List log files in R2
+npx wrangler r2 object list maven-files --prefix "logs/" --remote
+
+# Download a specific log file
+npx wrangler r2 object get maven-files logs/TENANT_ID/2026-01-27/1706345678123.ndjson \
+  --file /tmp/logs.ndjson --remote
+
+# View contents
+cat /tmp/logs.ndjson | jq .
+```
+
 ### Secrets Management (Cloudflare Secrets Store)
 
 Shared secrets use Cloudflare Secrets Store for centralized management across workers.

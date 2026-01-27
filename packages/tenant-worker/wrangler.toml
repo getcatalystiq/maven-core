@@ -29,8 +29,13 @@ new_sqlite_classes = ["Sandbox"]
 # Container for agent sandbox
 [[containers]]
 class_name = "Sandbox"
-image = "registry.cloudflare.com/7b7fb01e095cae40c829f948caa48f54/maven-agent:v1.3.3"
+image = "registry.cloudflare.com/7b7fb01e095cae40c829f948caa48f54/maven-agent:v1.3.11"
 instance_type = "basic"
+
+# R2 bucket for agent logs
+[[r2_buckets]]
+binding = "LOGS"
+bucket_name = "maven-files"
 
 # Environment variables
 [vars]
@@ -112,12 +117,17 @@ class_name = "TenantAgent"
 # file injection, command execution, and process management.
 [[env.production.containers]]
 class_name = "Sandbox"
-image = "registry.cloudflare.com/7b7fb01e095cae40c829f948caa48f54/maven-agent:v1.3.3"
+image = "registry.cloudflare.com/7b7fb01e095cae40c829f948caa48f54/maven-agent:v1.3.11"
 instance_type = "basic"
 
 [[env.production.durable_objects.bindings]]
 name = "Sandbox"
 class_name = "Sandbox"
+
+# R2 bucket for agent logs (production)
+[[env.production.r2_buckets]]
+binding = "LOGS"
+bucket_name = "maven-files"
 
 # Migrations for production - must include all DO classes
 [[env.production.migrations]]

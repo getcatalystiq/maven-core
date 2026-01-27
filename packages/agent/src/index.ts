@@ -7,6 +7,20 @@
  * Uses Bun's native WebSocket for real-time streaming (7x faster than Node.js + ws).
  */
 
+// Initialize structured logger before anything else
+// Note: The DO pulls logs from the container's log file using the pull model
+// The logger here captures console output for structured formatting
+import { initLogger, shutdownLogger, getLogger } from './logging';
+
+const tenantId = Bun.env.TENANT_ID || '';
+
+initLogger({
+  tenantId,
+  maxBatchSize: 50,
+  flushIntervalMs: 5000,
+  passthrough: true, // Always show in stdout - DO reads from log file
+});
+
 // Import agent to trigger backend auto-detection before logging
 import './agent';
 
@@ -132,6 +146,10 @@ const server = Bun.serve<WebSocketData>({
       const t0 = Date.now();
       const t = () => Date.now() - t0;
 
+      // Set session context for structured logging
+      const logger = getLogger();
+      logger.configure({ tenantId });
+
       console.log(`[WS] T+${t()}ms: Message received`);
 
       try {
@@ -241,6 +259,9 @@ const shutdown = async (signal: string) => {
       // Already closed
     }
   }
+
+  // Flush any remaining logs before exit
+  await shutdownLogger();
 
   // Brief drain period
   await new Promise(r => setTimeout(r, 500));

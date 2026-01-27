@@ -28,6 +28,9 @@ export interface Env {
   // Sandbox SDK binding (for production - Cloudflare Sandbox)
   Sandbox: DurableObjectNamespace<Sandbox>;
 
+  // R2 bucket for agent logs
+  LOGS: R2Bucket;
+
   // JWT Configuration
   JWT_ISSUER: string;
 
