@@ -144,7 +144,7 @@ Maven-core is a TypeScript framework for building AI agents with multi-tenancy s
 - **Cloudflare Workers** - Serverless compute
 - **Cloudflare D1** - SQLite database
 - **Cloudflare KV** - Key-value storage
-- **Cloudflare R2** - Object storage (skill files)
+- **Cloudflare R2** - Object storage (skill files, agent logs)
 - **Durable Objects** - Per-tenant state management
 - **Cloudflare Containers** - Sandbox execution environment
 
@@ -263,14 +263,15 @@ curl -X DELETE "http://localhost:8787/admin/logs?tenantId=TENANT_ID&before=2026-
 **Checking logs via R2 directly:**
 
 ```bash
-# List log files in R2
-npx wrangler r2 object list maven-files --prefix "logs/" --remote
-
-# Download a specific log file
-npx wrangler r2 object get maven-files logs/TENANT_ID/2026-01-27/1706345678123.ndjson \
+# Download a specific log file (bucket/key as single path)
+npx wrangler r2 object get "maven-files/logs/TENANT_ID/2026-01-27/1706345678123.ndjson" \
   --file /tmp/logs.ndjson --remote
 
-# View contents
+# Or pipe directly to stdout
+npx wrangler r2 object get "maven-files/logs/TENANT_ID/2026-01-27/1706345678123.ndjson" \
+  --pipe --remote | jq .
+
+# View log entries
 cat /tmp/logs.ndjson | jq .
 ```
 
