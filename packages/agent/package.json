@@ -1,0 +1,28 @@
+{
+  "name": "@maven/agent",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "bun build src/index.ts --outdir=dist --target=bun",
+    "dev": "bun run --watch src/index.ts",
+    "start": "bun dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.20",
+    "@hono/zod-validator": "^0.7.6",
+    "@maven/shared": "*",
+    "gray-matter": "^4.0.3",
+    "hono": "^4.6.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.0"
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "name": "@maven/tenant-worker",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "dev": "wrangler dev",
+    "build": "tsc",
+    "build:bundle": "esbuild src/index.ts --bundle --format=esm --platform=node --target=esnext --outfile=dist/bundle.js --external:cloudflare:workers --conditions=workerd",
+    "deploy": "echo '❌ ERROR: Do not deploy shared tenant worker. Use: npm run tenant deploy <slug>' && exit 1",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@cloudflare/sandbox": "^0.7.0",
+    "@maven/shared": "*",
+    "hono": "^4.6.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250109.0",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.0",
+    "wrangler": "^4.60.0"
+  }
+}

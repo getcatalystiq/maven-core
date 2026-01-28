@@ -1,0 +1,21 @@
+services:
+  agent:
+    build:
+      context: .
+      dockerfile: packages/agent/Dockerfile
+    ports:
+      - "8080:8080"
+    env_file:
+      - packages/agent/.env
+    environment:
+      - PORT=8080
+      - TENANT_ID=${TENANT_ID:-}
+      - SKILLS_PATH=/app/skills
+    volumes:
+      # Mount skills directory if you have local skills
+      - ./skills:/app/skills:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3

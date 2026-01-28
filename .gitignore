@@ -1,0 +1,65 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+*.tsbuildinfo
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Testing
+coverage/
+.vitest/
+
+# Turborepo
+.turbo/
+
+# Wrangler
+.wrangler/
+.tenant-config/
+wrangler.toml
+wrangler-*.toml
+
+# Environment files with secrets (never commit!)
+.dev.vars
+packages/*/.dev.vars
+packages/*/.env
+
+# Local development keys
+.keys/
+*.pem
+
+# Local dev server state
+.pids/
+.logs/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Data directories
+data/
+*.db
+*.sqlite
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Optional npm cache
+.npm
+
+# TypeScript cache
+*.tsbuildinfo
+
+.claude

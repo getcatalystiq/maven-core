@@ -1,0 +1,86 @@
+# Maven Control Plane - Wrangler Configuration
+#
+# Copy this file to wrangler.toml and fill in your Cloudflare resource IDs:
+#   cp wrangler.toml.example wrangler.toml
+#
+# Required resources to create in Cloudflare:
+#   1. D1 Database: wrangler d1 create maven
+#   2. KV Namespace: wrangler kv:namespace create KV
+#   3. R2 Bucket: wrangler r2 bucket create maven-files
+#   4. Secrets Store: Create via Cloudflare dashboard or API
+
+name = "maven-control-plane"
+main = "src/index.ts"
+compatibility_date = "2025-01-23"
+compatibility_flags = ["nodejs_compat"]
+
+# Enable observability
+[observability]
+enabled = true
+
+# D1 Database
+[[d1_databases]]
+binding = "DB"
+database_name = "maven"
+database_id = "YOUR_D1_DATABASE_ID"
+
+# KV Namespaces
+[[kv_namespaces]]
+binding = "KV"
+id = "YOUR_KV_NAMESPACE_ID"
+
+# R2 Buckets
+[[r2_buckets]]
+binding = "FILES"
+bucket_name = "maven-files"
+
+# Environment variables
+[vars]
+JWT_ISSUER = "https://maven.example.com"
+JWT_KEY_ID = "maven-key-1"
+# Agent container image tag - update this when pushing new versions
+AGENT_IMAGE_TAG = "v1.0.0"
+
+# Cloudflare Secrets Store bindings (shared secrets across workers)
+# @see https://developers.cloudflare.com/secrets-store/
+[[secrets_store_secrets]]
+binding = "JWT_PUBLIC_KEY"
+store_id = "YOUR_SECRETS_STORE_ID"
+secret_name = "maven-jwt-public-key"
+
+[[secrets_store_secrets]]
+binding = "INTERNAL_API_KEY"
+store_id = "YOUR_SECRETS_STORE_ID"
+secret_name = "maven-internal-api-key"
+
+[[secrets_store_secrets]]
+binding = "CF_ACCOUNT_ID"
+store_id = "YOUR_SECRETS_STORE_ID"
+secret_name = "maven-cf-account-id"
+
+[[secrets_store_secrets]]
+binding = "CF_API_TOKEN"
+store_id = "YOUR_SECRETS_STORE_ID"
+secret_name = "maven-cf-api-token"
+
+# Per-worker secrets (JWT_PRIVATE_KEY is too large for Secrets Store)
+# Set via: wrangler secret put JWT_PRIVATE_KEY
+
+# Local development server config
+[dev]
+port = 8787
+
+# Development configuration
+[env.development]
+name = "maven-control-plane-dev"
+
+# Production configuration
+[env.production]
+name = "maven-control-plane"
+
+[env.production.vars]
+JWT_ISSUER = "https://api.maven.example.com"
+
+[[env.production.routes]]
+pattern = "api.maven.example.com/*"
+zone_name = "example.com"
