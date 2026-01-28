@@ -54,7 +54,7 @@ app.post(
 
     console.log(`[STREAM] T+${t()}ms: Request received`);
 
-    const { message, sessionId: requestedSessionId } = c.req.valid('json');
+    const { message, sessionId: requestedSessionId, sessionPath } = c.req.valid('json');
 
     // Get context from headers (tenant required)
     const tenantId = c.req.header('X-Tenant-Id');
@@ -67,7 +67,7 @@ app.post(
     // Generate session ID if not provided
     const sessionId = requestedSessionId || crypto.randomUUID();
 
-    console.log(`[STREAM] T+${t()}ms: Parsed request, session=${sessionId}`);
+    console.log(`[STREAM] T+${t()}ms: Parsed request, session=${sessionId}, sessionPath=${sessionPath || 'none'}`);
 
     const encoder = new TextEncoder();
 
@@ -116,10 +116,11 @@ app.post(
           console.log(`[STREAM] T+${t()}ms: Emitted start event`);
 
           // Use V1 chat() which has includePartialMessages: true for streaming
-          console.log(`[STREAM] T+${t()}ms: Starting V1 chat()...`);
+          console.log(`[STREAM] T+${t()}ms: Starting V1 chat() with sessionPath=${sessionPath || 'none'}...`);
 
           for await (const msg of chat(message, {
             sessionId,
+            sessionPath, // Session workspace path for native skill loading
             tenantId,
             userId,
             userRoles,

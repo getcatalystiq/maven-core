@@ -97,6 +97,7 @@ import { buildMcpServers, parseConnectorsFromEnv } from './mcp/servers';
 
 export interface ChatOptions {
   sessionId?: string;
+  sessionPath?: string; // Session workspace path for native skill loading
   tenantId: string;
   userId: string;
   userRoles?: string[];
@@ -125,20 +126,43 @@ export interface ChatResult {
 
 /**
  * Build query options for the SDK
+ *
+ * When sessionPath is provided, enables native skill loading via:
+ * - cwd: set to sessionPath for project-scoped discovery
+ * - settingSources: ['project'] to load skills from {cwd}/.claude/skills/
+ * - Skill added to allowedTools
+ *
+ * systemPrompt is kept as fallback for environments without native skill support.
  */
 function buildQueryOptions(
   systemPrompt: string,
   mcpServers: Record<string, McpServerConfig>,
   model?: string,
-  resume?: string
+  resume?: string,
+  sessionPath?: string
 ) {
+  // Use sessionPath for native skill loading, fall back to WORKSPACE_PATH or cwd
+  const cwd = sessionPath || process.env.SESSION_PATH || process.env.WORKSPACE_PATH || process.cwd();
+
+  // Enable native skill loading when we have a session path
+  const useNativeSkills = !!(sessionPath || process.env.SESSION_PATH);
+
+  // Include 'Skill' tool when native skills are enabled
+  const allowedTools = useNativeSkills
+    ? ['Skill', 'Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep']
+    : ['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep'];
+
   const options = {
     resume,
     model: model || process.env.ANTHROPIC_MODEL || DEFAULT_BEDROCK_MODEL,
     includePartialMessages: true,
     permissionMode: 'bypassPermissions' as const,
-    cwd: process.env.WORKSPACE_PATH || process.cwd(),
-    allowedTools: ['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep'] as string[],
+    cwd,
+    allowedTools: allowedTools as string[],
+    // Enable native skill loading from {cwd}/.claude/skills/ when session path is set
+    ...(useNativeSkills && { settingSources: ['project'] as ('user' | 'project')[] }),
+    // Keep systemPrompt as fallback for backward compatibility
+    // When native skills work, this becomes redundant but harmless
     systemPrompt,
     mcpServers: Object.keys(mcpServers).length > 0 ? mcpServers : undefined,
     // Path to globally installed Claude CLI (npm install -g @anthropic-ai/claude-code)
@@ -153,10 +177,13 @@ function buildQueryOptions(
   console.log('Query options:', {
     model: options.model,
     cwd: options.cwd,
+    useNativeSkills,
+    settingSources: useNativeSkills ? ['project'] : undefined,
     permissionMode: options.permissionMode,
     resume: options.resume,
     mcpServersCount: Object.keys(mcpServers).length,
     systemPromptLength: systemPrompt.length,
+    allowedTools: options.allowedTools,
   });
   return options;
 }
@@ -235,11 +262,13 @@ export async function* chat(
   // TODO: Re-enable resume only for sessions that originated from Claude SDK responses.
 
   // Start new session
-  console.log(`[CHAT] T+${t()}ms: Starting Claude SDK query()...`);
+  // Use sessionPath for native skill loading if provided
+  const sessionPath = options.sessionPath || process.env.SESSION_PATH;
+  console.log(`[CHAT] T+${t()}ms: Starting Claude SDK query() (sessionPath: ${sessionPath || 'none'})...`);
   const sdkStart = Date.now();
   const result = query({
     prompt: message,
-    options: buildQueryOptions(systemPrompt, mcpServers, options.model),
+    options: buildQueryOptions(systemPrompt, mcpServers, options.model, undefined, sessionPath),
   });
 
   let firstYield = true;

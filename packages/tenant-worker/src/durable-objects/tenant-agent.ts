@@ -22,6 +22,7 @@ import type { Env } from '../index';
 interface SandboxConfig {
   tenantId: string;
   userId: string;
+  sessionId?: string;  // Session-scoped operations
   skills: Array<{ name: string; content?: string }>;
   connectors: Array<{ name: string; type: string; config: unknown }>;
 }
@@ -40,6 +41,34 @@ interface ProcessInfo {
   running: boolean;
 }
 
+/**
+ * Session directory metadata for tracking and cleanup
+ */
+interface SessionDirectoryMeta {
+  path: string;
+  createdAt: number;
+  lastActivity: number;
+}
+
+/**
+ * Session workspace base path in the sandbox
+ */
+const SESSIONS_BASE_PATH = '/home/maven/sessions';
+
+/**
+ * Compute session workspace path from session ID
+ */
+function getSessionWorkspacePath(sessionId: string): string {
+  return `${SESSIONS_BASE_PATH}/${sessionId}`;
+}
+
+/**
+ * Compute session skills path from session ID
+ */
+function getSessionSkillsPath(sessionId: string): string {
+  return `${SESSIONS_BASE_PATH}/${sessionId}/.claude/skills`;
+}
+
 export class TenantAgent extends DurableObject<Env> {
   private sandbox: Sandbox | null = null;
   private configHash: string | null = null;
@@ -48,6 +77,10 @@ export class TenantAgent extends DurableObject<Env> {
   private configCacheTime: number = 0;
   private static readonly CONFIG_CACHE_TTL_MS = 60000; // 60 seconds
 
+  // Session directory management
+  private static readonly MAX_SESSION_DIRS = 50;
+  private static readonly SESSION_IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+
   // Log buffering
   private logBuffer: LogEntry[] = [];
   private lastLogOffset: number = 0; // Track how many log lines we've already read
@@ -55,6 +88,16 @@ export class TenantAgent extends DurableObject<Env> {
   private static readonly LOG_FLUSH_INTERVAL_MS = 10000; // 10 seconds
   private static readonly LOG_RETENTION_DAYS = 7;
   private static readonly AGENT_LOG_FILE = '/tmp/agent.log';
+
+  /**
+   * Validate session ID format to prevent path traversal attacks
+   * Only allows alphanumeric characters and hyphens, max 64 chars
+   */
+  private isValidSessionId(sessionId: string): boolean {
+    return /^[a-zA-Z0-9-]{1,64}$/.test(sessionId) &&
+           !sessionId.includes('..') &&
+           !sessionId.includes('/');
+  }
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -98,11 +141,11 @@ export class TenantAgent extends DurableObject<Env> {
   /**
    * Ensure sandbox is ready with current configuration
    */
-  private async ensureSandboxReady(tenantId: string, userId: string, requestStart?: number): Promise<void> {
+  private async ensureSandboxReady(tenantId: string, userId: string, sessionId: string, requestStart?: number): Promise<void> {
     const t0 = requestStart || Date.now();
     const t = () => Date.now() - t0;
 
-    console.log(`[TIMING] T+${t()}ms: ensureSandboxReady started`);
+    console.log(`[TIMING] T+${t()}ms: ensureSandboxReady started (session: ${sessionId})`);
 
     // Get or create sandbox instance
     if (!this.sandbox) {
@@ -138,21 +181,23 @@ export class TenantAgent extends DurableObject<Env> {
       console.log(`[TIMING] T+${t()}ms: Config fetched (${config.skills.length} skills, ${config.connectors.length} connectors)`);
     }
 
-    const newHash = this.computeConfigHash(config);
+    // Include sessionId in hash since skills are now session-scoped
+    const newHash = this.computeConfigHash(config) + `-session:${sessionId}`;
 
-    // Only re-inject if configuration changed
+    // Only re-inject if configuration changed or new session
     if (this.configHash !== newHash) {
-      console.log(`[TIMING] T+${t()}ms: Config changed, re-injecting skills`);
-      await this.injectConfiguration(config);
+      console.log(`[TIMING] T+${t()}ms: Config changed or new session, injecting skills to session path`);
+      await this.injectConfiguration(config, sessionId);
       this.configHash = newHash;
-      console.log(`[TIMING] T+${t()}ms: Skills injected`);
+      console.log(`[TIMING] T+${t()}ms: Skills injected to session path`);
     } else {
-      console.log(`[TIMING] T+${t()}ms: Config unchanged, skipping injection`);
+      console.log(`[TIMING] T+${t()}ms: Config unchanged, updating session activity`);
+      await this.updateSessionActivity(sessionId);
     }
 
     // Ensure agent is running
     console.log(`[TIMING] T+${t()}ms: Ensuring agent is running`);
-    await this.ensureAgentRunning(config, t0);
+    await this.ensureAgentRunning(config, sessionId, t0);
     console.log(`[TIMING] T+${t()}ms: Agent running confirmed`);
   }
 
@@ -160,54 +205,172 @@ export class TenantAgent extends DurableObject<Env> {
    * Inject skills and configuration into the sandbox
    * Uses parallel writes to save 100-200ms with 3+ skills
    *
-   * Skills are injected to ~/.claude/skills/ (native Claude Code location)
-   * so the SDK can load them automatically via settingSources: ['user']
+   * Skills are injected to per-session directories for isolation:
+   * /home/maven/sessions/{sessionId}/.claude/skills/
+   *
+   * This enables native SDK skill loading via settingSources: ['project']
+   * with the session workspace as cwd.
    */
-  private async injectConfiguration(config: SandboxConfig): Promise<void> {
+  private async injectConfiguration(config: SandboxConfig, sessionId: string): Promise<void> {
     if (!this.sandbox) return;
 
-    // Native Claude Code skills path (~/.claude/skills/)
-    // Agent runs as 'maven' user with HOME=/home/maven
-    const CLAUDE_SKILLS_PATH = '/home/maven/.claude/skills';
-    const CLAUDE_CONFIG_PATH = '/home/maven/.claude';
+    // Validate sessionId to prevent path traversal
+    if (!this.isValidSessionId(sessionId)) {
+      console.error(`[INJECT] Invalid sessionId format: ${sessionId}`);
+      throw new Error('Invalid session ID');
+    }
 
-    // Create Claude config and skills directories in parallel
+    // Session-scoped paths for skill isolation
+    const sessionPath = getSessionWorkspacePath(sessionId);
+    const sessionSkillsPath = getSessionSkillsPath(sessionId);
+    const sessionConfigPath = `${sessionPath}/config`;
+
+    console.log(`[INJECT] Using session-scoped path: ${sessionPath}`);
+
+    // Create session directories in parallel
     await Promise.all([
-      this.sandbox.mkdir(CLAUDE_SKILLS_PATH, { recursive: true }),
-      this.sandbox.mkdir('/app/config', { recursive: true }),
+      this.sandbox.mkdir(sessionSkillsPath, { recursive: true }),
+      this.sandbox.mkdir(sessionConfigPath, { recursive: true }),
     ]);
 
-    // Write all skills to native Claude location in parallel
-    const skillWrites = config.skills
-      .filter(skill => skill.content)
-      .map(async (skill) => {
-        const skillDir = `${CLAUDE_SKILLS_PATH}/${skill.name}`;
-        const skillPath = `${skillDir}/SKILL.md`;
-        await this.sandbox!.mkdir(skillDir, { recursive: true });
-        await this.sandbox!.writeFile(skillPath, skill.content!);
-        console.log(`Injected skill to native location: ${skill.name}`);
-      });
-
-    // Write connectors configuration in parallel with skills
-    const connectorWrite = this.sandbox.writeFile(
-      '/app/config/connectors.json',
-      JSON.stringify(config.connectors, null, 2)
-    ).then(() => {
-      console.log(`Injected ${config.connectors.length} connectors`);
+    // Re-validate skill names before filesystem writes (defense in depth)
+    const validSkills = config.skills.filter(skill => {
+      if (!skill.content) return false;
+      // Prevent path traversal in skill names
+      if (skill.name.includes('..') || skill.name.includes('/')) {
+        console.error(`[INJECT] Path traversal attempt in skill name: ${skill.name}`);
+        return false;
+      }
+      return true;
     });
 
-    // Ensure a minimal settings.json exists for the SDK
-    // This enables native skill loading without any extra configuration
+    // Write all skills to session-scoped location in parallel
+    const skillWrites = validSkills.map(async (skill) => {
+      const skillDir = `${sessionSkillsPath}/${skill.name}`;
+      const skillPath = `${skillDir}/SKILL.md`;
+      await this.sandbox!.mkdir(skillDir, { recursive: true });
+      await this.sandbox!.writeFile(skillPath, skill.content!);
+      console.log(`[INJECT] Injected skill to session path: ${skill.name}`);
+    });
+
+    // Write connectors configuration to session-scoped path
+    const connectorWrite = this.sandbox.writeFile(
+      `${sessionConfigPath}/connectors.json`,
+      JSON.stringify(config.connectors, null, 2)
+    ).then(() => {
+      console.log(`[INJECT] Injected ${config.connectors.length} connectors to session path`);
+    });
+
+    // Create a minimal .claude directory with settings.json for SDK
+    const claudeConfigPath = `${sessionPath}/.claude`;
     const settingsWrite = this.sandbox.writeFile(
-      `${CLAUDE_CONFIG_PATH}/settings.json`,
+      `${claudeConfigPath}/settings.json`,
       JSON.stringify({}, null, 2)
     ).then(() => {
-      console.log('Created ~/.claude/settings.json');
+      console.log(`[INJECT] Created ${claudeConfigPath}/settings.json`);
     });
 
     await Promise.all([...skillWrites, connectorWrite, settingsWrite]);
+
+    // Track session directory for cleanup
+    await this.trackSessionDirectory(sessionId);
   }
 
+  /**
+   * Track session directory in DO storage for cleanup
+   */
+  private async trackSessionDirectory(sessionId: string): Promise<void> {
+    const now = Date.now();
+    const meta: SessionDirectoryMeta = {
+      path: getSessionWorkspacePath(sessionId),
+      createdAt: now,
+      lastActivity: now,
+    };
+    await this.ctx.storage.put(`session-dir:${sessionId}`, meta);
+
+    // Evict oldest if limit reached
+    await this.evictOldestSessionIfNeeded();
+  }
+
+  /**
+   * Update session activity timestamp
+   */
+  private async updateSessionActivity(sessionId: string): Promise<void> {
+    const meta = await this.ctx.storage.get<SessionDirectoryMeta>(`session-dir:${sessionId}`);
+    if (meta) {
+      meta.lastActivity = Date.now();
+      await this.ctx.storage.put(`session-dir:${sessionId}`, meta);
+    }
+  }
+
+  /**
+   * Cleanup session directory with validation
+   */
+  private async cleanupSessionDirectory(sessionId: string): Promise<void> {
+    // Validate sessionId to prevent path traversal
+    if (!this.isValidSessionId(sessionId)) {
+      console.warn(`[CLEANUP] Invalid sessionId format: ${sessionId}`);
+      return;
+    }
+
+    if (!this.sandbox) {
+      console.warn('[CLEANUP] No sandbox available for cleanup');
+      return;
+    }
+
+    const sessionPath = getSessionWorkspacePath(sessionId);
+
+    try {
+      await this.sandbox.exec(`rm -rf "${sessionPath}"`);
+      await this.ctx.storage.delete(`session-dir:${sessionId}`);
+      console.log(`[CLEANUP] Removed session directory: ${sessionPath}`);
+    } catch (error) {
+      // Log but don't throw - cleanup should be best-effort
+      console.error(`[CLEANUP] Failed to remove session directory: ${sessionPath}`, error);
+    }
+  }
+
+  /**
+   * LRU eviction when session directory limit reached
+   */
+  private async evictOldestSessionIfNeeded(): Promise<void> {
+    const sessions = await this.ctx.storage.list<SessionDirectoryMeta>({ prefix: 'session-dir:' });
+
+    if (sessions.size >= TenantAgent.MAX_SESSION_DIRS) {
+      const sorted = [...sessions.entries()]
+        .sort((a, b) => a[1].lastActivity - b[1].lastActivity);
+
+      const oldest = sorted[0];
+      if (oldest) {
+        const sessionId = oldest[0].replace('session-dir:', '');
+        console.log(`[CLEANUP] Evicting oldest session (LRU): ${sessionId}`);
+        await this.cleanupSessionDirectory(sessionId);
+      }
+    }
+  }
+
+  /**
+   * Cleanup idle sessions that haven't been active within timeout
+   */
+  private async cleanupIdleSessions(): Promise<void> {
+    const sessions = await this.ctx.storage.list<SessionDirectoryMeta>({ prefix: 'session-dir:' });
+    const now = Date.now();
+    const cleanupPromises: Promise<void>[] = [];
+
+    for (const [key, meta] of sessions) {
+      const idleTime = now - meta.lastActivity;
+      if (idleTime > TenantAgent.SESSION_IDLE_TIMEOUT_MS) {
+        const sessionId = key.replace('session-dir:', '');
+        console.log(`[CLEANUP] Session ${sessionId} idle for ${Math.round(idleTime / 1000)}s, cleaning up`);
+        cleanupPromises.push(this.cleanupSessionDirectory(sessionId));
+      }
+    }
+
+    if (cleanupPromises.length > 0) {
+      await Promise.all(cleanupPromises);
+      console.log(`[CLEANUP] Cleaned up ${cleanupPromises.length} idle sessions`);
+    }
+  }
 
   /**
    * Ensure the agent HTTP server is running in the sandbox
@@ -215,7 +378,7 @@ export class TenantAgent extends DurableObject<Env> {
    * Optimized: On warm path, skip health check and trust agentProcess flag.
    * If proxy fails later, caller will reset and retry.
    */
-  private async ensureAgentRunning(config: SandboxConfig, requestStart?: number): Promise<void> {
+  private async ensureAgentRunning(config: SandboxConfig, sessionId: string, requestStart?: number): Promise<void> {
     const t0 = requestStart || Date.now();
     const t = () => Date.now() - t0;
 
@@ -249,6 +412,9 @@ export class TenantAgent extends DurableObject<Env> {
     }
     console.log(`[TIMING] T+${t()}ms: No existing server, need to start agent (COLD START)`);
 
+    // Compute session workspace path for native skill loading
+    const sessionPath = getSessionWorkspacePath(sessionId);
+
     // Build environment variables for the agent
     const env: Record<string, string> = {
       NODE_ENV: 'production', // Required: bind to 0.0.0.0 for container access
@@ -257,9 +423,11 @@ export class TenantAgent extends DurableObject<Env> {
       PATH: '/home/maven/.bun/bin:/usr/local/bin:/usr/bin:/bin',
       TENANT_ID: config.tenantId,
       USER_ID: config.userId,
-      // Native Claude Code skills location - SDK loads these via settingSources: ['user']
-      // Agent runs as 'maven' user with HOME=/home/maven
-      SKILLS_PATH: '/home/maven/.claude/skills',
+      // Session workspace path - SDK uses this as cwd with settingSources: ['project']
+      // to discover skills from {SESSION_PATH}/.claude/skills/
+      SESSION_PATH: sessionPath,
+      // Legacy skills path (deprecated - kept for backward compatibility)
+      SKILLS_PATH: getSessionSkillsPath(sessionId),
       CONNECTORS_CONFIG: JSON.stringify(config.connectors),
       PORT: '8080',
     };
@@ -427,18 +595,21 @@ export class TenantAgent extends DurableObject<Env> {
 
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       try {
-        // Ensure sandbox is ready
-        await this.ensureSandboxReady(tenantId, userId, requestStart);
-        console.log(`[TIMING] T+${t()}ms: Sandbox ready for streaming (attempt ${attempt + 1})`);
+        // Ensure sandbox is ready with session-scoped skills
+        await this.ensureSandboxReady(tenantId, userId, sessionId, requestStart);
+        console.log(`[TIMING] T+${t()}ms: Sandbox ready for streaming (attempt ${attempt + 1}, session: ${sessionId})`);
 
         if (!this.sandbox) {
           throw new Error('Sandbox not initialized');
         }
 
         // Build request safely - no shell escaping needed
+        // Include sessionPath so agent knows where to find skills
+        const sessionPath = getSessionWorkspacePath(sessionId);
         const payload = JSON.stringify({
           message: body.message,
           sessionId,
+          sessionPath, // Agent uses this as cwd for native skill loading
         });
 
         const agentRequest = new Request('http://localhost:8080/chat/stream', {
@@ -937,6 +1108,9 @@ export class TenantAgent extends DurableObject<Env> {
     if (this.logBuffer.length > 0) {
       await this.flushLogs(tenantId);
     }
+
+    // Cleanup idle session directories
+    await this.cleanupIdleSessions();
 
     if (idleTime > idleThreshold) {
       console.log(`Cleaning up idle sandbox for tenant DO: ${this.ctx.id.toString()}`);

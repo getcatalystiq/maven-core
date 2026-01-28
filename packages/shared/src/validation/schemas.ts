@@ -188,6 +188,7 @@ export const updateConnectorSchema = z.object({
 export const chatRequestSchema = z.object({
   message: z.string().min(1).max(100000),
   sessionId: z.string().optional(),
+  sessionPath: z.string().optional(), // Session workspace path for native skill loading
   skills: z.array(skillNameSchema).optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
 });
