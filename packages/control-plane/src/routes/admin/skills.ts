@@ -14,7 +14,11 @@ import {
   updateSkill,
   deleteSkill,
   assignSkillToRoles,
+  assignSkillToUser,
+  removeSkillFromUser,
+  listUsersForSkill,
 } from '../../services/skills';
+import { getUserById } from '../../services/database';
 import type { Env, Variables } from '../../index';
 import { z } from 'zod';
 
@@ -139,6 +143,57 @@ app.post('/:id/disable', async (c) => {
 
   await updateSkill(c.env.DB, c.env.FILES, id, { enabled: false });
   return c.json({ message: 'Skill disabled' });
+});
+
+// List users assigned to skill
+app.get('/:id/users', async (c) => {
+  const skillId = c.req.param('id');
+  const tenantId = c.get('tenantId');
+
+  const skill = await getSkillById(c.env.DB, skillId);
+  if (!skill || skill.tenantId !== tenantId) {
+    throw new HTTPException(404, { message: 'Skill not found' });
+  }
+
+  const assignments = await listUsersForSkill(c.env.DB, skillId);
+  return c.json({ assignments });
+});
+
+// Assign skill to user
+app.post('/:id/users/:userId', async (c) => {
+  const skillId = c.req.param('id');
+  const userId = c.req.param('userId');
+  const tenantId = c.get('tenantId');
+
+  // Verify skill exists and belongs to tenant
+  const skill = await getSkillById(c.env.DB, skillId);
+  if (!skill || skill.tenantId !== tenantId) {
+    throw new HTTPException(404, { message: 'Skill not found' });
+  }
+
+  // Verify user exists and belongs to tenant
+  const user = await getUserById(c.env.DB, userId);
+  if (!user || user.tenantId !== tenantId) {
+    throw new HTTPException(404, { message: 'User not found' });
+  }
+
+  const assignment = await assignSkillToUser(c.env.DB, tenantId, skillId, userId);
+  return c.json(assignment, 201);
+});
+
+// Remove skill from user
+app.delete('/:id/users/:userId', async (c) => {
+  const skillId = c.req.param('id');
+  const userId = c.req.param('userId');
+  const tenantId = c.get('tenantId');
+
+  const skill = await getSkillById(c.env.DB, skillId);
+  if (!skill || skill.tenantId !== tenantId) {
+    throw new HTTPException(404, { message: 'Skill not found' });
+  }
+
+  await removeSkillFromUser(c.env.DB, tenantId, skillId, userId);
+  return c.json({ message: 'User removed from skill' });
 });
 
 // Delete skill

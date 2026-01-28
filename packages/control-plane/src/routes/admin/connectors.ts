@@ -58,7 +58,7 @@ app.get('/:id', async (c) => {
 // Create connector
 app.post('/', zValidator('json', createConnectorSchema), async (c) => {
   const tenantId = c.get('tenantId');
-  const { name, type, config, oauthClientId, oauthClientSecret, oauthScopes } = c.req.valid('json');
+  const { name, description, type, config, oauthClientId, oauthClientSecret, oauthScopes } = c.req.valid('json');
 
   // Check for duplicate name
   const existing = await getConnectorByName(c.env.DB, tenantId, name);
@@ -72,6 +72,7 @@ app.post('/', zValidator('json', createConnectorSchema), async (c) => {
     id: connectorId,
     tenantId,
     name,
+    description,
     type,
     config,
     oauthClientId,

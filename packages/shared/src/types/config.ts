@@ -5,8 +5,28 @@
 export interface SandboxConfig {
   tenantId: string;
   userId: string;
+  sessionId?: string;  // Optional - only for session-scoped operations
   skills: SkillMetadata[];
   connectors: ConnectorMetadata[];
+}
+
+/**
+ * Session workspace base path in the sandbox
+ */
+export const SESSIONS_BASE_PATH = '/home/maven/sessions';
+
+/**
+ * Compute session workspace path from session ID
+ */
+export function getSessionWorkspacePath(sessionId: string): string {
+  return `${SESSIONS_BASE_PATH}/${sessionId}`;
+}
+
+/**
+ * Compute session skills path from session ID
+ */
+export function getSessionSkillsPath(sessionId: string): string {
+  return `${SESSIONS_BASE_PATH}/${sessionId}/.claude/skills`;
 }
 
 export interface SkillMetadata {

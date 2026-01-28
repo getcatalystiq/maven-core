@@ -733,28 +733,28 @@ The agent-native reviewer identified that while this plan improves token efficie
 
 ### Phase 1: Session Directories
 
-- [ ] Add session ID validation function
-- [ ] Modify `injectConfiguration()` to use session-scoped path for skills
-- [ ] Modify `injectConfiguration()` to use session-scoped path for connectors
-- [ ] Track session directories in DO storage
+- [x] Add session ID validation function (DONE - 2026-01-27)
+- [x] Modify `injectConfiguration()` to use session-scoped path for skills (DONE - 2026-01-27)
+- [x] Modify `injectConfiguration()` to use session-scoped path for connectors (DONE - 2026-01-27)
+- [x] Track session directories in DO storage (DONE - 2026-01-27)
 - [ ] Test concurrent sessions with different roles
 - [ ] Test concurrent sessions with different MCP connectors/OAuth tokens
 
 ### Phase 2: Native Skill Support (V1 already in use)
 
 - [x] Switch to V1 API in stream.ts (DONE - 2026-01-27)
-- [ ] Update `agent.ts` to accept `cwd` parameter
-- [ ] Add `settingSources: ['project']` to query options
-- [ ] Add `Skill` to allowedTools
-- [ ] Add stderr callback for error monitoring
+- [x] Update `agent.ts` to accept `cwd` parameter (DONE - 2026-01-27)
+- [x] Add `settingSources: ['project']` to query options (DONE - 2026-01-27)
+- [x] Add `Skill` to allowedTools (DONE - 2026-01-27)
+- [x] Add stderr callback for error monitoring (was already in place)
 - [ ] Monitor SDK init message for loaded skills
 - [ ] Remove manual systemPrompt skill injection (after verification)
 
 ### Phase 3: Cleanup
 
-- [ ] Implement `cleanupSessionDirectory()` with validation
-- [ ] Add LRU eviction when limit reached
-- [ ] Integrate with existing alarm-based cleanup
+- [x] Implement `cleanupSessionDirectory()` with validation (DONE - 2026-01-27)
+- [x] Add LRU eviction when limit reached (DONE - 2026-01-27)
+- [x] Integrate with existing alarm-based cleanup (DONE - 2026-01-27)
 - [ ] Test orphan cleanup on sandbox restart
 
 ### Phase 4: Security & Observability

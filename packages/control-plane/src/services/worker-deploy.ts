@@ -178,7 +178,7 @@ export async function deployTenantWorker(
   if (tier === 'starter' || tier === 'free') {
     return {
       workerName: 'maven-tenant',
-      workerUrl: 'https://maven-tenant.YOUR_SUBDOMAIN.workers.dev',
+      workerUrl: 'https://maven-tenant.tools-7b7.workers.dev',
       deployedAt: new Date().toISOString(),
     };
   }
@@ -223,7 +223,7 @@ export async function deployTenantWorker(
       {
         type: 'plain_text',
         name: 'CONTROL_PLANE_URL',
-        text: 'https://maven-control-plane.YOUR_SUBDOMAIN.workers.dev',
+        text: 'https://maven-control-plane.tools-7b7.workers.dev',
       },
       {
         type: 'plain_text',
@@ -380,7 +380,7 @@ async function getWorkersSubdomainWithCreds(creds: CloudflareCredentials): Promi
     // ignore
   }
 
-  return 'your-subdomain';
+  return 'tools-7b7';
 }
 
 /**

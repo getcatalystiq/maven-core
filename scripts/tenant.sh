@@ -26,7 +26,7 @@ CONTROL_PLANE_URL="${CONTROL_PLANE_URL:-http://localhost:8787}"
 INTERNAL_API_KEY="${INTERNAL_API_KEY:-}"
 
 # Container image settings
-CF_ACCOUNT_ID="${CF_ACCOUNT_ID:?Error: CF_ACCOUNT_ID environment variable is required}"
+CF_ACCOUNT_ID="${CF_ACCOUNT_ID:-7b7fb01e095cae40c829f948caa48f54}"
 AGENT_IMAGE_TAG="${AGENT_IMAGE_TAG:-v1.0.0}"
 
 # Parse command and arguments
@@ -167,7 +167,7 @@ run_dev() {
     echo -e "${RED}Error: tenant slug required${NC}"
     echo ""
     echo "Usage: npm run tenant dev <slug>"
-    echo "Example: npm run tenant dev my-tenant"
+    echo "Example: npm run tenant dev easycarnet"
     exit 1
   fi
 
@@ -220,7 +220,7 @@ run_deploy() {
     echo -e "${RED}Error: tenant slug required${NC}"
     echo ""
     echo "Usage: npm run tenant deploy <slug>"
-    echo "Example: npm run tenant deploy my-tenant"
+    echo "Example: npm run tenant deploy easycarnet"
     exit 1
   fi
 
@@ -314,9 +314,9 @@ case $COMMAND in
     echo -e "  ${GREEN}list${NC}             List all available tenants"
     echo ""
     echo "Examples:"
-    echo -e "  ${YELLOW}npm run tenant dev my-tenant${NC}"
-    echo -e "  ${YELLOW}npm run tenant deploy my-tenant${NC}"
-    echo -e "  ${YELLOW}npm run tenant deploy my-tenant --dry-run${NC}"
+    echo -e "  ${YELLOW}npm run tenant dev easycarnet${NC}"
+    echo -e "  ${YELLOW}npm run tenant deploy easycarnet${NC}"
+    echo -e "  ${YELLOW}npm run tenant deploy easycarnet --dry-run${NC}"
     echo -e "  ${YELLOW}npm run tenant list${NC}"
     echo ""
     echo "Environment variables:"

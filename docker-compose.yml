@@ -9,7 +9,7 @@ services:
       - packages/agent/.env
     environment:
       - PORT=8080
-      - TENANT_ID=${TENANT_ID:-}
+      - TENANT_ID=f9e71141-7173-4ebe-b19d-4a5fe708913b
       - SKILLS_PATH=/app/skills
     volumes:
       # Mount skills directory if you have local skills
