@@ -1,18 +1,14 @@
 /**
- * Streaming chat route handler - V2 Session Manager
+ * Streaming chat route handler - V1 Query API
  *
- * Uses the V2 Session API for warm starts (~2-3s) after the first cold start (~10s).
- * Sessions are kept alive and reused for subsequent messages.
+ * Uses the V1 query() API with includePartialMessages: true for real-time streaming.
+ * Each request spawns a new query - no session reuse.
  */
 
 import { Hono } from 'hono';
 import { zValidator } from '@hono/zod-validator';
 import { chatRequestSchema } from '@maven/shared';
-import {
-  getOrCreateSession,
-  sendMessage,
-  getSessionStats,
-} from '../session-manager';
+import { chat } from '../agent';
 
 const app = new Hono();
 
@@ -40,13 +36,12 @@ function ndjsonLine(data: unknown): string {
 }
 
 /**
- * Stats endpoint - shows session manager statistics
+ * Stats endpoint - V1 has no session stats
  */
 app.get('/stats', (c) => {
-  const stats = getSessionStats();
   return c.json({
-    version: 'v2.0.0-session-manager',
-    ...stats,
+    version: 'v1.0.0-query-api',
+    note: 'V1 query API - no session persistence',
   });
 });
 
@@ -76,8 +71,7 @@ app.post(
 
     const encoder = new TextEncoder();
 
-    // AbortController for cancellation propagation - must be outside ReadableStream
-    // so it's accessible from both start() and cancel() callbacks
+    // AbortController for cancellation propagation
     const abortController = new AbortController();
 
     const stream = new ReadableStream({
@@ -87,6 +81,7 @@ app.post(
         let receivedResult = false;
         let firstMsgTime: number | null = null;
         let controllerClosed = false;
+        let sdkSessionId: string | undefined;
 
         // Safe enqueue that checks if controller is still open
         const safeEnqueue = (data: Uint8Array) => {
@@ -113,56 +108,45 @@ app.post(
         };
 
         try {
-          // Get or create session (warm path is instant, cold path creates SDK session)
-          console.log(`[STREAM] T+${t()}ms: Getting/creating session...`);
-          const session = await getOrCreateSession(
-            sessionId,
-            tenantId,
-            userId,
-            userRoles
-          );
-
-          const isWarm = session.messageCount > 0;
-          const sessionInfoTime = t();
-          console.log(`[STREAM] T+${sessionInfoTime}ms: Session ready (warm=${isWarm}, msgCount=${session.messageCount})`);
-
-          // Emit session info event - includes warm status for client telemetry
-          safeEnqueue(
-            encoder.encode(ndjsonLine({
-              type: 'session_info',
-              sessionId: session.id,
-              isWarm,
-              messageCount: session.messageCount,
-              timing: {
-                sessionReadyMs: sessionInfoTime,
-              },
-            }))
-          );
-
           // Emit start event
           safeEnqueue(
             encoder.encode(ndjsonLine({ type: 'start', sessionId }))
           );
           console.log(`[STREAM] T+${t()}ms: Emitted start event`);
 
-          // Send message and stream responses
-          console.log(`[STREAM] T+${t()}ms: Sending message to session...`);
+          // Use V1 chat() which has includePartialMessages: true for streaming
+          console.log(`[STREAM] T+${t()}ms: Starting V1 chat()...`);
 
-          for await (const msg of sendMessage(session, message, abortController.signal)) {
+          for await (const msg of chat(message, {
+            sessionId,
+            tenantId,
+            userId,
+            userRoles,
+          })) {
             // Check if client disconnected
             if (abortController.signal.aborted) {
-              console.log(`[STREAM] T+${t()}ms: Client disconnected, stopping message processing`);
+              console.log(`[STREAM] T+${t()}ms: Client disconnected, stopping`);
               break;
             }
 
-            if (!firstMsgTime) {
+            if (!firstMsgTime && msg.type !== 'timing') {
               firstMsgTime = t();
-              console.log(`[STREAM] T+${firstMsgTime}ms: First message from SDK (type: ${msg.type})`);
+              console.log(`[STREAM] T+${firstMsgTime}ms: First SDK message (type: ${msg.type})`);
             }
 
             // Handle different message types
-            if (msg.type === 'system') {
-              // System init message - emit for debugging
+            if (msg.type === 'timing') {
+              // Internal timing event - emit for telemetry
+              safeEnqueue(
+                encoder.encode(ndjsonLine({
+                  type: 'timing',
+                  phase: msg.phase,
+                  ms: msg.ms,
+                  details: msg.details,
+                }))
+              );
+            } else if (msg.type === 'system') {
+              // System init message
               safeEnqueue(
                 encoder.encode(ndjsonLine({
                   type: 'system',
@@ -170,15 +154,18 @@ app.post(
                 }))
               );
             } else if (msg.type === 'stream_event') {
+              // Incremental streaming event - this is the key for real-time streaming!
+              // Pass through directly for widget to consume
               safeEnqueue(
-                encoder.encode(ndjsonLine({ ...msg, type: 'stream' }))
+                encoder.encode(ndjsonLine({
+                  type: 'stream',
+                  event: msg.event,
+                }))
               );
             } else if (msg.type === 'assistant') {
-              // Extract text and emit in format widget expects
-              // Widget expects: {"type":"stream","event":{"type":"content_block_delta","delta":{"text":"..."}}}
+              // Complete assistant message (fallback if stream_event not available)
               for (const block of msg.message.content) {
                 if (block.type === 'text') {
-                  // Emit as stream event for widget compatibility
                   safeEnqueue(
                     encoder.encode(ndjsonLine({
                       type: 'stream',
@@ -190,40 +177,36 @@ app.post(
                   );
                 } else if (block.type === 'tool_use') {
                   safeEnqueue(
-                    encoder.encode(
-                      ndjsonLine({
-                        type: 'tool_use',
-                        id: block.id,
-                        name: block.name,
-                        input: block.input,
-                      })
-                    )
+                    encoder.encode(ndjsonLine({
+                      type: 'tool_use',
+                      id: block.id,
+                      name: block.name,
+                      input: block.input,
+                    }))
                   );
                 }
               }
             } else if (msg.type === 'result') {
               receivedResult = true;
+              sdkSessionId = msg.session_id;
               safeEnqueue(
-                encoder.encode(
-                  ndjsonLine({
-                    type: 'done',
-                    sessionId: msg.session_id || sessionId,
-                    isWarm,
-                    usage: {
-                      inputTokens: msg.usage.input_tokens,
-                      outputTokens: msg.usage.output_tokens,
-                    },
-                    timing: {
-                      totalMs: t(),
-                      firstMsgMs: firstMsgTime,
-                    },
-                  })
-                )
+                encoder.encode(ndjsonLine({
+                  type: 'done',
+                  sessionId: msg.session_id || sessionId,
+                  usage: {
+                    inputTokens: msg.usage.input_tokens,
+                    outputTokens: msg.usage.output_tokens,
+                  },
+                  timing: {
+                    totalMs: t(),
+                    firstMsgMs: firstMsgTime,
+                  },
+                }))
               );
             }
           }
 
-          console.log(`[STREAM] T+${t()}ms: Message loop completed`);
+          console.log(`[STREAM] T+${t()}ms: Chat completed, SDK session: ${sdkSessionId}`);
         } catch (error) {
           const errorMessage = (error as Error).message;
           // Ignore "exit code 1" errors if we already received a result
