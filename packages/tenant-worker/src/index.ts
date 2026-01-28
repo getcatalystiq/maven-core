@@ -279,6 +279,24 @@ app.get('/ws/chat', jwtAuth, async (c) => {
   return agent.fetch(request);
 });
 
+// Debug endpoint to get agent logs (requires auth)
+app.get('/debug/logs', jwtAuth, async (c) => {
+  const tenantId = c.get('tenantId');
+  const userId = c.get('userId');
+  const agentId = c.env.TENANT_AGENT.idFromName(`tenant-${tenantId}`);
+  const agent = c.env.TENANT_AGENT.get(agentId);
+
+  const request = new Request(new URL('/debug/logs', c.req.url).toString(), {
+    method: 'GET',
+    headers: {
+      'X-Tenant-Id': tenantId,
+      'X-User-Id': userId,
+    },
+  });
+
+  return agent.fetch(request);
+});
+
 // 404 handler
 app.notFound((c) => {
   return c.json({ error: 'Not Found', path: c.req.path }, 404);

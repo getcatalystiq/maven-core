@@ -82,6 +82,31 @@ app.post(
 
         let receivedResult = false;
         let firstMsgTime: number | null = null;
+        let controllerClosed = false;
+
+        // Safe enqueue that checks if controller is still open
+        const safeEnqueue = (data: Uint8Array) => {
+          if (!controllerClosed) {
+            try {
+              controller.enqueue(data);
+            } catch (e) {
+              console.log(`[STREAM] T+${t()}ms: Enqueue failed (controller closed)`);
+              controllerClosed = true;
+            }
+          }
+        };
+
+        // Safe close that only closes once
+        const safeClose = () => {
+          if (!controllerClosed) {
+            controllerClosed = true;
+            try {
+              controller.close();
+            } catch (e) {
+              console.log(`[STREAM] T+${t()}ms: Close failed (already closed)`);
+            }
+          }
+        };
 
         try {
           // Get or create session (warm path is instant, cold path creates SDK session)
@@ -98,7 +123,7 @@ app.post(
           console.log(`[STREAM] T+${sessionInfoTime}ms: Session ready (warm=${isWarm}, msgCount=${session.messageCount})`);
 
           // Emit session info event - includes warm status for client telemetry
-          controller.enqueue(
+          safeEnqueue(
             encoder.encode(ndjsonLine({
               type: 'session_info',
               sessionId: session.id,
@@ -111,7 +136,7 @@ app.post(
           );
 
           // Emit start event
-          controller.enqueue(
+          safeEnqueue(
             encoder.encode(ndjsonLine({ type: 'start', sessionId }))
           );
           console.log(`[STREAM] T+${t()}ms: Emitted start event`);
@@ -128,14 +153,14 @@ app.post(
             // Handle different message types
             if (msg.type === 'system') {
               // System init message - emit for debugging
-              controller.enqueue(
+              safeEnqueue(
                 encoder.encode(ndjsonLine({
                   type: 'system',
                   subtype: 'subtype' in msg ? msg.subtype : 'unknown',
                 }))
               );
             } else if (msg.type === 'stream_event') {
-              controller.enqueue(
+              safeEnqueue(
                 encoder.encode(ndjsonLine({ ...msg, type: 'stream' }))
               );
             } else if (msg.type === 'assistant') {
@@ -144,7 +169,7 @@ app.post(
               for (const block of msg.message.content) {
                 if (block.type === 'text') {
                   // Emit as stream event for widget compatibility
-                  controller.enqueue(
+                  safeEnqueue(
                     encoder.encode(ndjsonLine({
                       type: 'stream',
                       event: {
@@ -154,7 +179,7 @@ app.post(
                     }))
                   );
                 } else if (block.type === 'tool_use') {
-                  controller.enqueue(
+                  safeEnqueue(
                     encoder.encode(
                       ndjsonLine({
                         type: 'tool_use',
@@ -168,7 +193,7 @@ app.post(
               }
             } else if (msg.type === 'result') {
               receivedResult = true;
-              controller.enqueue(
+              safeEnqueue(
                 encoder.encode(
                   ndjsonLine({
                     type: 'done',
@@ -196,13 +221,13 @@ app.post(
             console.log('Ignoring exit code 1 after successful result');
           } else {
             console.error(`[STREAM] T+${t()}ms: Error:`, error);
-            controller.enqueue(
+            safeEnqueue(
               encoder.encode(ndjsonLine({ type: 'error', message: errorMessage }))
             );
           }
         } finally {
           console.log(`[STREAM] T+${t()}ms: Closing controller`);
-          controller.close();
+          safeClose();
         }
       },
     });

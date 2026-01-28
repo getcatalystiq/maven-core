@@ -1,13 +1,14 @@
 /**
  * Tenant Agent Durable Object
  *
- * Routes chat requests to the agent sandbox via HTTP.
+ * Routes chat requests to the agent sandbox via HTTP streaming.
  * Each tenant gets an isolated sandbox environment with dynamically injected skills.
  *
  * Uses Cloudflare Sandbox SDK for:
  * - Dynamic skill injection via writeFile()
  * - Environment configuration via startProcess()
  * - Config hash tracking for change detection
+ * - HTTP streaming via containerFetch()
  *
  * For local development: Uses AGENT_URL to proxy to local agent
  * For production: Uses Cloudflare Sandbox SDK via Sandbox binding
@@ -79,21 +80,14 @@ export class TenantAgent extends DurableObject<Env> {
     await this.ctx.storage.setAlarm(Date.now() + alarmInterval);
 
     // Route requests
-    // Check for WebSocket upgrade first
-    const upgradeHeader = request.headers.get('Upgrade');
-    if (upgradeHeader?.toLowerCase() === 'websocket') {
-      return this.handleWebSocketChat(request, tenantId, userId);
+    // Debug endpoint to get agent logs
+    if (url.pathname.endsWith('/debug/logs')) {
+      return this.handleDebugLogs(tenantId);
     }
 
-    // Log ingestion endpoint (from agent container)
-    if (url.pathname.endsWith('/logs') && request.method === 'POST') {
-      return this.handleLogIngestion(request, tenantId);
-    }
-
-    if (url.pathname.endsWith('/chat/stream')) {
+    if (url.pathname.endsWith('/chat/stream') || url.pathname.endsWith('/chat') || url.pathname.endsWith('/chat/invocations')) {
+      // All chat endpoints use streaming - /chat is redirected to /chat/stream for performance
       return this.handleStreamChat(request, tenantId, userId);
-    } else if (url.pathname.endsWith('/chat') || url.pathname.endsWith('/chat/invocations')) {
-      return this.handleChat(request, tenantId, userId);
     } else if (url.pathname.includes('/sessions')) {
       return this.handleSessions(request, tenantId, userId);
     }
@@ -398,240 +392,11 @@ export class TenantAgent extends DurableObject<Env> {
   }
 
   /**
-   * Proxy HTTP request to sandbox agent using containerFetch
-   * Uses native HTTP streaming - no curl overhead or buffering
-   */
-  private async proxyToSandbox(
-    path: string,
-    tenantId: string,
-    userId: string,
-    body: unknown
-  ): Promise<Response> {
-    if (!this.sandbox) {
-      throw new Error('Sandbox not initialized');
-    }
-
-    // Use containerFetch for direct HTTP to the sandbox (no curl overhead)
-    const agentRequest = new Request(`http://localhost:8080${path}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Tenant-Id': tenantId,
-        'X-User-Id': userId,
-      },
-      body: JSON.stringify(body),
-    });
-
-    try {
-      const response = await this.sandbox.containerFetch(agentRequest, 8080);
-
-      if (!response.ok) {
-        // Collect diagnostics when request fails
-        const agentLog = await this.sandbox.exec('cat /tmp/agent.log 2>&1 | tail -50');
-        const psCheck = await this.sandbox.exec('ps aux 2>&1');
-        const portCheck = await this.sandbox.exec('ss -tulpn 2>&1 || netstat -tulpn 2>&1');
-
-        const responseText = await response.text();
-        const diagnostics = [
-          `Response status: ${response.status}`,
-          `Response body: ${responseText || 'empty'}`,
-          `Agent log: ${agentLog.stdout || agentLog.stderr || 'empty'}`,
-          `Processes: ${psCheck.stdout || psCheck.stderr || 'none'}`,
-          `Ports: ${portCheck.stdout || portCheck.stderr || 'none'}`,
-        ].join('\n---\n');
-
-        console.error('Proxy request diagnostics:', diagnostics);
-        throw new Error(`Agent request failed. Diagnostics:\n${diagnostics}`);
-      }
-
-      return response;
-    } catch (error) {
-      // Collect diagnostics on fetch error
-      const agentLog = await this.sandbox.exec('cat /tmp/agent.log 2>&1 | tail -50');
-      const psCheck = await this.sandbox.exec('ps aux 2>&1');
-      const portCheck = await this.sandbox.exec('ss -tulpn 2>&1 || netstat -tulpn 2>&1');
-
-      const diagnostics = [
-        `Fetch error: ${(error as Error).message}`,
-        `Agent log: ${agentLog.stdout || agentLog.stderr || 'empty'}`,
-        `Processes: ${psCheck.stdout || psCheck.stderr || 'none'}`,
-        `Ports: ${portCheck.stdout || portCheck.stderr || 'none'}`,
-      ].join('\n---\n');
-
-      console.error('Proxy request diagnostics:', diagnostics);
-      throw new Error(`Agent request failed. Diagnostics:\n${diagnostics}`);
-    }
-  }
-
-  /**
-   * Handle non-streaming chat request
-   */
-  private async handleChat(
-    request: Request,
-    tenantId: string,
-    userId: string
-  ): Promise<Response> {
-    const requestStart = parseInt(request.headers.get('X-Request-Start') || '0') || Date.now();
-    const t = () => Date.now() - requestStart;
-
-    try {
-      console.log(`[TIMING] T+${t()}ms: DO handleChat started`);
-
-      // Local dev mode: proxy to local agent
-      if (this.env.AGENT_URL) {
-        return this.proxyToAgent(request, '/chat');
-      }
-
-      const body = (await request.json()) as { message: string; sessionId?: string };
-      const sessionId = body.sessionId || crypto.randomUUID();
-      console.log(`[TIMING] T+${t()}ms: Request body parsed`);
-
-      // Ensure sandbox is ready with current config
-      await this.ensureSandboxReady(tenantId, userId, requestStart);
-      console.log(`[TIMING] T+${t()}ms: Sandbox ready, proxying to agent`);
-
-      // Proxy request to agent in sandbox (with retry on failure)
-      let agentResponse: Response;
-      try {
-        agentResponse = await this.proxyToSandbox('/chat', tenantId, userId, {
-          message: body.message,
-          sessionId,
-        });
-      } catch (proxyError) {
-        // Proxy failed - agent may have crashed, reset and retry once
-        console.log(`[TIMING] T+${t()}ms: Proxy failed, resetting agent and retrying`);
-        this.agentProcess = null;
-        await this.ensureAgentRunning({ tenantId, userId, skills: [], connectors: [] }, requestStart);
-        console.log(`[TIMING] T+${t()}ms: Agent restarted, retrying proxy`);
-        agentResponse = await this.proxyToSandbox('/chat', tenantId, userId, {
-          message: body.message,
-          sessionId,
-        });
-      }
-      console.log(`[TIMING] T+${t()}ms: Agent response received`);
-
-      if (!agentResponse.ok) {
-        const errorText = await agentResponse.text();
-        console.error('Agent request failed:', errorText);
-        return this.jsonResponse(
-          {
-            error: 'Agent execution failed',
-            details: errorText,
-            sessionId,
-          },
-          500
-        );
-      }
-
-      const response = (await agentResponse.json()) as {
-        text?: string;
-        response?: string;
-        error?: string;
-        usage?: { inputTokens: number; outputTokens: number };
-      };
-
-      // If agent returned an error, include diagnostics for debugging
-      if (response.error) {
-        const agentLog = await this.sandbox!.exec('cat /tmp/agent.log 2>&1 | tail -50');
-        return this.jsonResponse({
-          response: response,
-          sessionId,
-          usage: response.usage || { inputTokens: 0, outputTokens: 0 },
-          diagnostics: {
-            agentLog: agentLog.stdout || agentLog.stderr || 'empty',
-          },
-        });
-      }
-
-      // Store session
-      await this.ctx.storage.put(`session:${userId}:${sessionId}`, {
-        id: sessionId,
-        lastMessage: body.message,
-        lastResponse: response,
-        updatedAt: Date.now(),
-      });
-
-      return this.jsonResponse({
-        response: response.text || response.response || response,
-        sessionId,
-        usage: response.usage || { inputTokens: 0, outputTokens: 0 },
-      });
-    } catch (error) {
-      console.error('Chat error:', error);
-      return this.jsonResponse(
-        { error: 'Chat processing failed', message: (error as Error).message },
-        500
-      );
-    }
-  }
-
-  /**
-   * Handle WebSocket chat upgrade request with retry logic
-   *
-   * Uses sandbox.wsConnect() to proxy WebSocket directly to the Bun server.
-   * Retries up to 3 times with increasing delays to handle sandbox sleep/wake cycles.
-   */
-  private async handleWebSocketChat(
-    request: Request,
-    tenantId: string,
-    userId: string
-  ): Promise<Response> {
-    const t0 = Date.now();
-    const t = () => Date.now() - t0;
-    const maxRetries = 3;
-    const retryDelays = [1000, 3000, 8000]; // Accommodate cold starts
-
-    console.log(`[WS-DO] T+${t()}ms: WebSocket upgrade request received`);
-
-    for (let attempt = 0; attempt < maxRetries; attempt++) {
-      try {
-        await this.ensureSandboxReady(tenantId, userId, t0);
-
-        if (!this.sandbox) {
-          throw new Error('Sandbox not initialized');
-        }
-
-        // Build WebSocket request to Bun server
-        const url = new URL(request.url);
-        url.pathname = '/ws/chat';
-
-        const headers = new Headers(request.headers);
-        headers.set('X-Tenant-Id', tenantId);
-        headers.set('X-User-Id', userId);
-
-        const wsRequest = new Request(url.toString(), {
-          method: 'GET',
-          headers,
-        });
-
-        const response = await this.sandbox.wsConnect(wsRequest, 8080);
-        console.log(`[WS-DO] T+${t()}ms: WebSocket connected (attempt ${attempt + 1})`);
-        return response;
-
-      } catch (error) {
-        console.error(`[WS-DO] T+${t()}ms: WebSocket attempt ${attempt + 1} failed:`, error);
-
-        // Reset state so next attempt triggers fresh sandbox
-        this.agentProcess = null;
-
-        if (attempt < maxRetries - 1) {
-          await new Promise(r => setTimeout(r, retryDelays[attempt]));
-          continue;
-        }
-
-        return new Response('WebSocket connection failed', { status: 503 });
-      }
-    }
-
-    // TypeScript unreachable
-    throw new Error('Unreachable');
-  }
-
-  /**
-   * Handle streaming chat request
+   * Handle streaming chat request with retry logic
    *
    * Uses containerFetch with HTTP streaming for real-time NDJSON streaming.
    * The agent's /chat/stream endpoint returns a streaming Response body.
+   * Retries up to 3 times with increasing delays to handle sandbox sleep/wake cycles.
    */
   private async handleStreamChat(
     request: Request,
@@ -640,117 +405,117 @@ export class TenantAgent extends DurableObject<Env> {
   ): Promise<Response> {
     const requestStart = parseInt(request.headers.get('X-Request-Start') || '0') || Date.now();
     const t = () => Date.now() - requestStart;
+    const maxRetries = 3;
+    const retryDelays = [1000, 3000, 8000]; // Accommodate cold starts
 
+    console.log(`[TIMING] T+${t()}ms: DO handleStreamChat started`);
+
+    // Local dev mode: proxy to local agent (no retry needed)
+    if (this.env.AGENT_URL) {
+      return this.proxyToAgent(request, '/chat/stream');
+    }
+
+    // Parse body once before retry loop
+    let body: { message: string; sessionId?: string };
     try {
-      console.log(`[TIMING] T+${t()}ms: DO handleStreamChat started`);
-
-      // Local dev mode: proxy to local agent
-      if (this.env.AGENT_URL) {
-        return this.proxyToAgent(request, '/chat/stream');
-      }
-
-      const body = (await request.json()) as { message: string; sessionId?: string };
-      const sessionId = body.sessionId || crypto.randomUUID();
-      console.log(`[TIMING] T+${t()}ms: Request body parsed`);
-
-      // Ensure sandbox is ready
-      await this.ensureSandboxReady(tenantId, userId, requestStart);
-      console.log(`[TIMING] T+${t()}ms: Sandbox ready for streaming`);
-
-      if (!this.sandbox) {
-        throw new Error('Sandbox not initialized');
-      }
-
-      // Use HTTP streaming via containerFetch
-      return await this.handleStreamChatHTTP(tenantId, userId, body, sessionId, t);
-    } catch (error) {
-      console.error('Stream chat error:', error);
-      return this.jsonResponse(
-        { error: 'Stream processing failed', message: (error as Error).message },
-        500
-      );
+      body = (await request.json()) as { message: string; sessionId?: string };
+    } catch {
+      return this.jsonResponse({ error: 'Invalid request body' }, 400);
     }
-  }
+    const sessionId = body.sessionId || crypto.randomUUID();
+    console.log(`[TIMING] T+${t()}ms: Request body parsed`);
 
-  /**
-   * Stream via containerFetch for HTTP streaming
-   *
-   * Uses containerFetch instead of exec(curl) to:
-   * 1. Eliminate security vulnerability (command injection via user payload)
-   * 2. Reduce latency by ~200-1000ms (no process spawn overhead)
-   * 3. Enable proper streaming via HTTP response body
-   */
-  private async handleStreamChatHTTP(
-    tenantId: string,
-    userId: string,
-    body: { message: string; sessionId?: string },
-    sessionId: string,
-    t: () => number
-  ): Promise<Response> {
-    if (!this.sandbox) {
-      throw new Error('Sandbox not initialized');
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+        // Ensure sandbox is ready
+        await this.ensureSandboxReady(tenantId, userId, requestStart);
+        console.log(`[TIMING] T+${t()}ms: Sandbox ready for streaming (attempt ${attempt + 1})`);
+
+        if (!this.sandbox) {
+          throw new Error('Sandbox not initialized');
+        }
+
+        // Build request safely - no shell escaping needed
+        const payload = JSON.stringify({
+          message: body.message,
+          sessionId,
+        });
+
+        const agentRequest = new Request('http://localhost:8080/chat/stream', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Tenant-Id': tenantId,
+            'X-User-Id': userId,
+          },
+          body: payload,
+        });
+
+        console.log(`[TIMING] T+${t()}ms: Making containerFetch request to agent`);
+
+        const response = await this.sandbox.containerFetch(agentRequest, 8080);
+        console.log(`[TIMING] T+${t()}ms: containerFetch returned, status: ${response.status}`);
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          console.error(`[TIMING] T+${t()}ms: Agent returned error:`, errorText);
+          throw new Error(`Agent request failed: ${response.status} - ${errorText}`);
+        }
+
+        if (!response.body) {
+          throw new Error('Agent returned no response body');
+        }
+
+        console.log(`[TIMING] T+${t()}ms: Stream started successfully (attempt ${attempt + 1})`);
+
+        // Return the streaming response directly
+        // The agent's response is already a streaming NDJSON body
+        return new Response(response.body, {
+          headers: {
+            'Content-Type': 'application/x-ndjson',
+            'Cache-Control': 'no-cache, no-transform',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no',
+          },
+        });
+
+      } catch (error) {
+        console.error(`[TIMING] T+${t()}ms: Stream attempt ${attempt + 1} failed:`, error);
+
+        // Collect diagnostics on failure
+        if (this.sandbox) {
+          try {
+            const agentLog = await this.sandbox.exec('cat /tmp/agent.log 2>&1 | tail -30');
+            const psCheck = await this.sandbox.exec('ps aux 2>&1');
+            console.error('Stream request diagnostics:', [
+              `Error: ${(error as Error).message}`,
+              `Agent log: ${agentLog.stdout || agentLog.stderr || 'empty'}`,
+              `Processes: ${psCheck.stdout || psCheck.stderr || 'none'}`,
+            ].join('\n---\n'));
+          } catch {
+            // Diagnostics collection failed, continue
+          }
+        }
+
+        // Reset agent state so next attempt triggers fresh startup
+        this.agentProcess = null;
+
+        if (attempt < maxRetries - 1) {
+          console.log(`[TIMING] T+${t()}ms: Retrying in ${retryDelays[attempt]}ms...`);
+          await new Promise(r => setTimeout(r, retryDelays[attempt]));
+          continue;
+        }
+
+        // All retries exhausted
+        return this.jsonResponse(
+          { error: 'Stream processing failed', message: (error as Error).message },
+          500
+        );
+      }
     }
 
-    console.log(`[TIMING] T+${t()}ms: Starting HTTP streaming via containerFetch`);
-
-    // Build request safely - no shell escaping needed
-    const payload = JSON.stringify({
-      message: body.message,
-      sessionId,
-    });
-
-    const agentRequest = new Request(`http://localhost:8080/chat/stream`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Tenant-Id': tenantId,
-        'X-User-Id': userId,
-      },
-      body: payload,
-    });
-
-    console.log(`[TIMING] T+${t()}ms: Making containerFetch request to agent`);
-
-    try {
-      const response = await this.sandbox.containerFetch(agentRequest, 8080);
-      console.log(`[TIMING] T+${t()}ms: containerFetch returned, status: ${response.status}`);
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.error(`[TIMING] T+${t()}ms: Agent returned error:`, errorText);
-        throw new Error(`Agent request failed: ${response.status} - ${errorText}`);
-      }
-
-      if (!response.body) {
-        throw new Error('Agent returned no response body');
-      }
-
-      // Return the streaming response directly
-      // The agent's response is already a streaming NDJSON body
-      return new Response(response.body, {
-        headers: {
-          'Content-Type': 'application/x-ndjson',
-          'Cache-Control': 'no-cache, no-transform',
-          'Connection': 'keep-alive',
-          'X-Accel-Buffering': 'no',
-        },
-      });
-    } catch (error) {
-      console.error(`[TIMING] T+${t()}ms: containerFetch error:`, error);
-
-      // Collect diagnostics
-      const agentLog = await this.sandbox.exec('cat /tmp/agent.log 2>&1 | tail -30');
-      const psCheck = await this.sandbox.exec('ps aux 2>&1');
-
-      const diagnostics = [
-        `Fetch error: ${(error as Error).message}`,
-        `Agent log: ${agentLog.stdout || agentLog.stderr || 'empty'}`,
-        `Processes: ${psCheck.stdout || psCheck.stderr || 'none'}`,
-      ].join('\n---\n');
-
-      console.error('Stream request diagnostics:', diagnostics);
-      throw new Error(`Stream request failed. Diagnostics:\n${diagnostics}`);
-    }
+    // TypeScript unreachable
+    throw new Error('Unreachable');
   }
 
   /**
@@ -812,47 +577,29 @@ export class TenantAgent extends DurableObject<Env> {
   }
 
   /**
-   * Handle log ingestion from agent container (push model)
-   *
-   * Receives batched log entries and buffers them in memory.
-   * Flushes to R2 when buffer is full or on periodic alarm.
-   *
-   * Note: This is for future use when we have container-to-DO callback.
-   * Currently, we use the pull model (pullLogsFromContainer).
+   * Handle debug logs request - returns last 100 lines of agent logs
    */
-  private async handleLogIngestion(
-    request: Request,
-    tenantId: string
-  ): Promise<Response> {
+  private async handleDebugLogs(_tenantId: string): Promise<Response> {
+    if (!this.sandbox) {
+      return this.jsonResponse({ error: 'No sandbox available', logs: null });
+    }
+
     try {
-      const body = (await request.json()) as { entries: LogEntry[] };
-
-      if (!body.entries || !Array.isArray(body.entries)) {
-        return this.jsonResponse({ error: 'Invalid log payload' }, 400);
-      }
-
-      // Add entries to buffer
-      for (const entry of body.entries) {
-        // Ensure tenant ID is set
-        entry.tenant = entry.tenant || tenantId;
-        this.logBuffer.push(entry);
-      }
-
-      // Flush if buffer is full
-      if (this.logBuffer.length >= TenantAgent.LOG_BUFFER_MAX) {
-        await this.flushLogs(tenantId);
-      } else {
-        // Schedule flush alarm if not already set
-        const alarmTime = await this.ctx.storage.getAlarm();
-        if (!alarmTime) {
-          await this.ctx.storage.setAlarm(Date.now() + TenantAgent.LOG_FLUSH_INTERVAL_MS);
-        }
-      }
-
-      return this.jsonResponse({ received: body.entries.length });
+      const result = await this.sandbox.exec(
+        `cat ${TenantAgent.AGENT_LOG_FILE} 2>&1 | tail -100`
+      );
+      return this.jsonResponse({
+        logs: result.stdout || '',
+        stderr: result.stderr || '',
+        success: result.success,
+        logOffset: this.lastLogOffset,
+        bufferedLogs: this.logBuffer.length,
+      });
     } catch (error) {
-      console.error('Log ingestion error:', error);
-      return this.jsonResponse({ error: 'Log ingestion failed' }, 500);
+      return this.jsonResponse({
+        error: error instanceof Error ? error.message : 'Unknown error',
+        logs: null,
+      });
     }
   }
 
@@ -904,9 +651,22 @@ export class TenantAgent extends DurableObject<Env> {
       this.lastLogOffset += lines.length;
 
       // Parse log lines into structured entries
-      const now = new Date().toISOString();
+      // Agent writes JSON lines with timestamps, parse them to preserve timing
       for (const line of lines) {
-        // Detect log level from common prefixes
+        try {
+          // Try to parse as JSON (agent structured log)
+          const parsed = JSON.parse(line) as LogEntry;
+          if (parsed.ts && parsed.msg) {
+            // Valid structured log entry - preserve its timestamp
+            parsed.tenant = parsed.tenant || tenantId;
+            this.logBuffer.push(parsed);
+            continue;
+          }
+        } catch {
+          // Not JSON, fall through to plain text handling
+        }
+
+        // Plain text fallback - detect level from content
         let level: 'info' | 'warn' | 'error' = 'info';
         if (line.toLowerCase().includes('error') || line.toLowerCase().includes('fail')) {
           level = 'error';
@@ -915,7 +675,7 @@ export class TenantAgent extends DurableObject<Env> {
         }
 
         const entry: LogEntry = {
-          ts: now,
+          ts: new Date().toISOString(),
           level,
           msg: line,
           tenant: tenantId,

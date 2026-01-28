@@ -59,23 +59,48 @@ The `_migrations` table tracks which migrations have been applied.
 
 ### Tenant Worker (Cloudflare Worker)
 
-```bash
-# Shared tenant worker (default)
-cd packages/tenant-worker && npm run dev     # Port 8788
-cd packages/tenant-worker && npm run deploy
+**⚠️ CRITICAL: ALWAYS use `npm run tenant deploy <slug>` to deploy tenant workers.**
 
-# Dedicated tenant deployments via CLI
-npm run tenant dev <slug>       # Local dev for specific tenant
-npm run tenant deploy <slug>    # Deploy dedicated tenant worker
-npm run tenant list             # List all tenants
+**NEVER run `wrangler deploy` directly in packages/tenant-worker - it will not work.**
+
+```bash
+# PRODUCTION DEPLOYMENT - THE ONLY WAY
+npm run tenant deploy <slug>              # Deploy tenant worker with container
+npm run tenant deploy <slug> --dry-run    # Preview deployment config
+
+# Use specific image version
+AGENT_IMAGE_TAG=v1.0.0 npm run tenant deploy <slug>
+
+# Other tenant commands
+npm run tenant dev <slug>                 # Local dev with tenant config
+npm run tenant list                       # List all tenants
 
 # Examples
-npm run tenant dev easycarnet
+npm run tenant deploy easycarnet
 npm run tenant deploy easycarnet --dry-run
+AGENT_IMAGE_TAG=v2.0.0 npm run tenant deploy easycarnet
 ```
 
-The tenant CLI fetches config from the control plane's `/internal/tenant/:slug` endpoint
-and injects tenant-specific vars via wrangler `--var` and `--name` flags. Config is
+**Why must you use the tenant CLI?**
+- Container config is dynamically injected per tenant (name: `maven-tenant-{slug}-sandbox`)
+- The base `wrangler.toml` has NO container config - direct deploy will fail
+- Image tag is configurable via `AGENT_IMAGE_TAG` environment variable
+- Tenant-specific vars (ID, slug) are injected automatically
+
+**Environment variables for deployment:**
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AGENT_IMAGE_TAG` | `v1.0.0` | Container image tag to deploy |
+| `CF_ACCOUNT_ID` | (hardcoded) | Cloudflare account ID |
+| `CONTROL_PLANE_URL` | `http://localhost:8787` | Control plane for tenant config |
+
+**Local development only (no containers):**
+```bash
+cd packages/tenant-worker && npm run dev  # Port 8788
+```
+
+The tenant CLI fetches config from the control plane's `/internal/tenant/:slug` endpoint,
+generates a temporary wrangler config with container injected, and deploys. Config is
 cached in `packages/tenant-worker/.tenant-config/` for offline development.
 
 ### Agent (Docker Container)

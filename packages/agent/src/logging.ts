@@ -132,11 +132,12 @@ class StructuredLogger {
     this.buffer.push(entry);
 
     // Pass through to original console if enabled
+    // Write as JSON so the DO can parse timestamps when pulling logs
     if (this.config.passthrough) {
       const consoleFn = level === 'error' ? originalConsole.error :
                         level === 'warn' ? originalConsole.warn :
                         originalConsole.log;
-      consoleFn(msg);
+      consoleFn(JSON.stringify(entry));
     }
 
     // Flush if buffer is full

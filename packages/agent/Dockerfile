@@ -59,3 +59,6 @@ EXPOSE 8080
 ENV PORT=8080
 ENV NODE_ENV=production
 ENV HOME=/home/maven
+# Enable debug logging for Claude Agent SDK
+ENV DEBUG=1
+ENV CLAUDE_DEBUG=1

@@ -25,6 +25,10 @@ CONFIG_CACHE_DIR="$TENANT_WORKER_DIR/.tenant-config"
 CONTROL_PLANE_URL="${CONTROL_PLANE_URL:-http://localhost:8787}"
 INTERNAL_API_KEY="${INTERNAL_API_KEY:-}"
 
+# Container image settings
+CF_ACCOUNT_ID="${CF_ACCOUNT_ID:-7b7fb01e095cae40c829f948caa48f54}"
+AGENT_IMAGE_TAG="${AGENT_IMAGE_TAG:-v1.0.0}"
+
 # Parse command and arguments
 COMMAND="${1:-help}"
 SLUG="${2:-}"
@@ -83,6 +87,31 @@ json_value() {
   local json="$1"
   local key="$2"
   echo "$json" | grep -o "\"$key\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" | head -1 | sed 's/.*: *"\([^"]*\)".*/\1/'
+}
+
+# Function to generate wrangler config with injected container
+generate_wrangler_config() {
+  local slug="$1"
+  # Put generated config in tenant-worker dir so wrangler can find src/index.ts
+  local output_file="$TENANT_WORKER_DIR/wrangler-$slug.toml"
+  local base_config="$TENANT_WORKER_DIR/wrangler.toml"
+
+  # Read base config and inject container config before first "# R2 bucket for agent logs"
+  awk -v slug="$slug" -v account="$CF_ACCOUNT_ID" -v tag="$AGENT_IMAGE_TAG" '
+    BEGIN { injected = 0 }
+    /^# R2 bucket for agent logs/ && !injected {
+      print "[[containers]]"
+      print "name = \"maven-tenant-" slug "-sandbox\""
+      print "class_name = \"Sandbox\""
+      print "image = \"registry.cloudflare.com/" account "/maven-agent:" tag "\""
+      print "instance_type = \"basic\""
+      print ""
+      injected = 1
+    }
+    { print }
+  ' "$base_config" > "$output_file"
+
+  echo "$output_file"
 }
 
 # Function to list tenants
@@ -221,6 +250,14 @@ run_deploy() {
   echo -e "  Tenant: ${YELLOW}$tenant_name${NC} ($tenant_slug)"
   echo -e "  Tier:   ${YELLOW}$tenant_tier${NC}"
   echo -e "  ID:     ${YELLOW}$tenant_id${NC}"
+  echo -e "  Image:  ${YELLOW}maven-agent:${AGENT_IMAGE_TAG}${NC}"
+  echo ""
+
+  # Generate wrangler config with container injected
+  echo -e "  ${BLUE}→${NC} Generating wrangler config..."
+  local wrangler_config
+  wrangler_config=$(generate_wrangler_config "$tenant_slug")
+  echo -e "  ${GREEN}✓${NC} Config generated: $(basename "$wrangler_config")"
   echo ""
 
   cd "$TENANT_WORKER_DIR"
@@ -229,9 +266,14 @@ run_deploy() {
     echo -e "${YELLOW}Dry run - would deploy with:${NC}"
     echo ""
     echo "  wrangler deploy \\"
+    echo "    --config $wrangler_config \\"
     echo "    --name maven-tenant-$tenant_slug \\"
     echo "    --var TENANT_ID:$tenant_id \\"
-    echo "    --var TENANT_SLUG:$tenant_slug"
+    echo "    --var TENANT_SLUG:$tenant_slug \\"
+    echo "    --env \"\""
+    echo ""
+    echo -e "${BLUE}Generated container config:${NC}"
+    grep -A4 "^\[\[containers\]\]" "$wrangler_config" || true
     echo ""
     return 0
   fi
@@ -240,9 +282,11 @@ run_deploy() {
   echo ""
 
   exec wrangler deploy \
+    --config "$wrangler_config" \
     --name "maven-tenant-$tenant_slug" \
     --var "TENANT_ID:$tenant_id" \
-    --var "TENANT_SLUG:$tenant_slug"
+    --var "TENANT_SLUG:$tenant_slug" \
+    --env ""
 }
 
 # Main command handler
@@ -278,6 +322,8 @@ case $COMMAND in
     echo "Environment variables:"
     echo -e "  ${YELLOW}CONTROL_PLANE_URL${NC}  Control plane URL (default: http://localhost:8787)"
     echo -e "  ${YELLOW}INTERNAL_API_KEY${NC}   API key for internal endpoints"
+    echo -e "  ${YELLOW}CF_ACCOUNT_ID${NC}      Cloudflare account ID"
+    echo -e "  ${YELLOW}AGENT_IMAGE_TAG${NC}    Agent container image tag (default: v1.0.0)"
     echo ""
 
     if [ "$COMMAND" != "help" ]; then

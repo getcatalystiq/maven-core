@@ -12,7 +12,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.2.12",
+    "@anthropic-ai/claude-agent-sdk": "^0.2.20",
     "@hono/zod-validator": "^0.7.6",
     "@maven/shared": "*",
     "gray-matter": "^4.0.3",

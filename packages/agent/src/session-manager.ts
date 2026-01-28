@@ -13,7 +13,6 @@ import {
   type SDKMessage,
   type SDKSessionOptions,
 } from '@anthropic-ai/claude-agent-sdk';
-import { loadSkills, filterSkillsByRoles, buildSystemPromptFromSkills } from './skills/loader';
 
 // Managed session state
 interface ManagedSession {
@@ -40,24 +39,29 @@ const CLEANUP_INTERVAL_MS = 60 * 1000;
 
 /**
  * Build SDK session options
+ *
+ * Note: V2 Session API doesn't support settingSources directly.
+ * Skills are loaded from the native location (~/.claude/skills/) which is
+ * populated by the tenant-worker's skill injection process.
+ * Role-based filtering happens at injection time.
  */
-async function buildSessionOptions(
-  userRoles: string[],
+function buildSessionOptions(
+  _userRoles: string[],
   model?: string
-): Promise<{ options: Omit<SDKSessionOptions, 'pathToClaudeCodeExecutable'>; systemPrompt: string }> {
-  const allSkills = await loadSkills();
-  const skills = filterSkillsByRoles(allSkills, userRoles);
-  const systemPrompt = buildSystemPromptFromSkills(skills);
+): { options: Omit<SDKSessionOptions, 'pathToClaudeCodeExecutable'> } {
+  // Skills are now loaded natively from ~/.claude/skills/
+  // Role filtering happens at injection time in tenant-worker
+  // V2 API doesn't support settingSources, but skills should be picked up
+  // from the native location automatically
 
   return {
     options: {
       model: model || process.env.ANTHROPIC_MODEL || 'us.anthropic.claude-opus-4-5-20251101-v1:0',
       permissionMode: 'bypassPermissions' as const,
       allowedTools: ['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep'],
-      // Note: mcpServers and systemPrompt not supported in V2 session options directly
+      // Note: mcpServers not supported in V2 session options directly
       // TODO: Add MCP server support when V2 API supports it
     },
-    systemPrompt,
   };
 }
 
@@ -87,12 +91,12 @@ export async function getOrCreateSession(
   const t0 = Date.now();
 
   // Build configuration
-  const { options, systemPrompt } = await buildSessionOptions(userRoles, model);
-  console.log(`[SESSION] Config built in ${Date.now() - t0}ms (${systemPrompt.length} chars system prompt)`);
+  // Skills are loaded natively from ~/.claude/skills/ (injected by tenant-worker)
+  const { options } = buildSessionOptions(userRoles, model);
+  console.log(`[SESSION] Config built in ${Date.now() - t0}ms (native skill loading)`);
 
   // Create V2 SDK session
-  // Note: V2 API doesn't support systemPrompt directly in options
-  // The first message will include any context needed
+  // Skills are loaded from native location ~/.claude/skills/
   const sdkSession = unstable_v2_createSession({
     ...options,
     pathToClaudeCodeExecutable: '/usr/local/bin/claude',

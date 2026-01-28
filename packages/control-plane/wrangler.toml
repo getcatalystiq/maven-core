@@ -29,7 +29,7 @@ JWT_ISSUER = "https://maven.example.com"
 JWT_KEY_ID = "maven-key-1"
 # Agent container image tag - update this when pushing new versions
 # Run: npx wrangler vars put AGENT_IMAGE_TAG --value "vX.Y.Z" --name maven-control-plane
-AGENT_IMAGE_TAG = "v1.3.3"
+AGENT_IMAGE_TAG = "v1.3.19"
 
 # Cloudflare Secrets Store bindings (shared secrets across workers)
 # @see https://developers.cloudflare.com/secrets-store/

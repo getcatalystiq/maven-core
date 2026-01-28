@@ -54,3 +54,5 @@ npm-debug.log*
 
 # TypeScript cache
 *.tsbuildinfo
+
+.claude

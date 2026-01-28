@@ -1,3 +1,19 @@
+# ============================================================================
+# ⚠️  WARNING: DO NOT RUN `wrangler deploy` DIRECTLY
+# ============================================================================
+# This config is a BASE TEMPLATE. Container config is injected dynamically.
+#
+# ALWAYS USE: npm run tenant deploy <slug>
+#
+# The tenant CLI script generates container config per tenant:
+#   - Container name: maven-tenant-{slug}-sandbox
+#   - Image tag: controlled by AGENT_IMAGE_TAG env var (default: v1.0.0)
+#
+# Example:
+#   npm run tenant deploy easycarnet
+#   AGENT_IMAGE_TAG=v2.0.0 npm run tenant deploy easycarnet
+# ============================================================================
+
 name = "maven-tenant"
 main = "src/index.ts"
 compatibility_date = "2025-01-23"
@@ -22,15 +38,18 @@ class_name = "Sandbox"
 tag = "v1"
 new_sqlite_classes = ["TenantAgent"]
 
+# Sandbox migration for dedicated tenant deployments
 [[migrations]]
 tag = "v2"
 new_sqlite_classes = ["Sandbox"]
 
-# Container for agent sandbox
-[[containers]]
-class_name = "Sandbox"
-image = "registry.cloudflare.com/7b7fb01e095cae40c829f948caa48f54/maven-agent:v1.3.11"
-instance_type = "basic"
+# Container for agent sandbox (injected by tenant.sh script)
+# The tenant CLI script generates container config dynamically:
+#   [[containers]]
+#   name = "maven-tenant-{SLUG}-sandbox"
+#   class_name = "Sandbox"
+#   image = "registry.cloudflare.com/{ACCOUNT_ID}/maven-agent:{VERSION}"
+#   instance_type = "basic"
 
 # R2 bucket for agent logs
 [[r2_buckets]]
@@ -113,16 +132,17 @@ name = "TENANT_AGENT"
 class_name = "TenantAgent"
 
 # Sandbox SDK Container Configuration
+# NOTE: Disabled for shared worker - only used for dedicated tenant deployments
 # The Sandbox class is exported from @cloudflare/sandbox and provides
 # file injection, command execution, and process management.
-[[env.production.containers]]
-class_name = "Sandbox"
-image = "registry.cloudflare.com/7b7fb01e095cae40c829f948caa48f54/maven-agent:v1.3.11"
-instance_type = "basic"
+# [[env.production.containers]]
+# class_name = "Sandbox"
+# image = "registry.cloudflare.com/7b7fb01e095cae40c829f948caa48f54/maven-agent:v1.0.0"
+# instance_type = "basic"
 
-[[env.production.durable_objects.bindings]]
-name = "Sandbox"
-class_name = "Sandbox"
+# [[env.production.durable_objects.bindings]]
+# name = "Sandbox"
+# class_name = "Sandbox"
 
 # R2 bucket for agent logs (production)
 [[env.production.r2_buckets]]
@@ -134,18 +154,31 @@ bucket_name = "maven-files"
 tag = "v1"
 new_sqlite_classes = ["TenantAgent"]
 
-[[env.production.migrations]]
-tag = "v2"
-new_sqlite_classes = ["Sandbox"]
+# NOTE: Sandbox migration only needed for dedicated tenant deployments
+# [[env.production.migrations]]
+# tag = "v2"
+# new_sqlite_classes = ["Sandbox"]
 
-# Per-tenant deployment (via tenant CLI)
-# For dedicated tenant workers, use the tenant CLI script:
+# ============================================================================
+# DEPLOYMENT INSTRUCTIONS
+# ============================================================================
+# ALWAYS USE THE TENANT CLI - NEVER RUN wrangler deploy DIRECTLY
 #
-#   npm run tenant dev easycarnet     # Local dev with tenant config
-#   npm run tenant deploy easycarnet  # Deploy dedicated tenant worker
-#   npm run tenant list               # List all tenants
+# Deploy a tenant:
+#   npm run tenant deploy <slug>
 #
-# The script fetches config from Control Plane's /internal/tenant/:slug endpoint
-# and injects vars via wrangler --var and --name flags:
-#   wrangler dev --name maven-tenant-easycarnet \
-#     --var TENANT_ID:uuid --var TENANT_SLUG:easycarnet
+# Deploy with specific image version:
+#   AGENT_IMAGE_TAG=v1.0.0 npm run tenant deploy <slug>
+#
+# Preview deployment (dry run):
+#   npm run tenant deploy <slug> --dry-run
+#
+# Other commands:
+#   npm run tenant dev <slug>    # Local dev with tenant config
+#   npm run tenant list          # List all tenants
+#
+# The script:
+# 1. Fetches tenant config from Control Plane /internal/tenant/:slug
+# 2. Generates temporary wrangler config with container injected
+# 3. Deploys with tenant-specific vars via --var and --name flags
+# ============================================================================
