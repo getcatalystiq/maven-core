@@ -722,19 +722,20 @@ export class TenantAgent extends DurableObject<Env> {
           flush: async () => {
             console.log(`[DIAG] T+${t()}ms: Stream complete. ${chunkCount} chunks, ${totalBytes} bytes total`);
 
-            // Update session metadata in KV after stream completes
-            if (this.env.KV) {
-              const now = new Date().toISOString();
-              const metadata: SessionMetadata = {
-                userId,
-                status: 'active',
-                createdAt: existingSession?.createdAt || now,
-                lastActivity: now,
-                messageCount: (existingSession?.messageCount || 0) + 1,
-                totalInputTokens: (existingSession?.totalInputTokens || 0) + inputTokens,
-                totalOutputTokens: (existingSession?.totalOutputTokens || 0) + outputTokens,
-              };
+            // Update session metadata in KV and D1 after stream completes
+            const now = new Date().toISOString();
+            const metadata: SessionMetadata = {
+              userId,
+              status: 'active',
+              createdAt: existingSession?.createdAt || now,
+              lastActivity: now,
+              messageCount: (existingSession?.messageCount || 0) + 1,
+              totalInputTokens: (existingSession?.totalInputTokens || 0) + inputTokens,
+              totalOutputTokens: (existingSession?.totalOutputTokens || 0) + outputTokens,
+            };
 
+            // Write to KV (fast lookup for ownership checks)
+            if (this.env.KV) {
               try {
                 await putSessionMetadata(
                   this.env.KV,
@@ -743,10 +744,39 @@ export class TenantAgent extends DurableObject<Env> {
                   metadata,
                   SESSION_TTL_SECONDS
                 );
-                console.log(`[SESSION] Updated session metadata: ${sessionId} (messages: ${metadata.messageCount})`);
+                console.log(`[SESSION] Updated session metadata in KV: ${sessionId} (messages: ${metadata.messageCount})`);
               } catch (error) {
-                // Don't fail the request if metadata update fails
-                console.error(`[SESSION] Failed to update session metadata:`, error);
+                console.error(`[SESSION] Failed to update session metadata in KV:`, error);
+              }
+            }
+
+            // Write to D1 via control-plane (for session listing)
+            if (this.env.CONTROL_PLANE_URL && this.env.INTERNAL_API_KEY) {
+              try {
+                const internalKey = await getSecret(this.env.INTERNAL_API_KEY);
+                await fetch(
+                  `${this.env.CONTROL_PLANE_URL}/internal/sessions/${tenantId}/${sessionId}`,
+                  {
+                    method: 'POST',
+                    headers: {
+                      'Content-Type': 'application/json',
+                      'X-Internal-Key': internalKey,
+                    },
+                    body: JSON.stringify({
+                      userId,
+                      status: 'active',
+                      metadata: {
+                        lastMessage: body.message.slice(0, 100),  // First 100 chars of user message
+                        messageCount: metadata.messageCount,
+                        totalInputTokens: metadata.totalInputTokens,
+                        totalOutputTokens: metadata.totalOutputTokens,
+                      },
+                    }),
+                  }
+                );
+                console.log(`[SESSION] Updated session in D1: ${sessionId}`);
+              } catch (error) {
+                console.error(`[SESSION] Failed to update session in D1:`, error);
               }
             }
           },
@@ -855,22 +885,39 @@ export class TenantAgent extends DurableObject<Env> {
   }
 
   /**
-   * Handle session listing
+   * Handle session listing - fetches from control-plane D1
    */
   private async handleSessions(
     _request: Request,
-    _tenantId: string,
+    tenantId: string,
     userId: string
   ): Promise<Response> {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const sessions = await this.ctx.storage.list<any>({ prefix: `session:${userId}:` });
+    // Fetch sessions from control-plane (D1 database)
+    if (this.env.CONTROL_PLANE_URL && this.env.INTERNAL_API_KEY) {
+      try {
+        const internalKey = await getSecret(this.env.INTERNAL_API_KEY);
+        const response = await fetch(
+          `${this.env.CONTROL_PLANE_URL}/internal/sessions/${tenantId}/${userId}`,
+          {
+            headers: {
+              'X-Internal-Key': internalKey,
+            },
+          }
+        );
 
-    return this.jsonResponse({
-      sessions: Array.from(sessions.entries()).map(([key, value]) => ({
-        id: key.replace(`session:${userId}:`, ''),
-        ...value,
-      })),
-    });
+        if (response.ok) {
+          const data = await response.json() as { sessions: unknown[]; count: number };
+          return this.jsonResponse(data);
+        }
+
+        console.warn('[Sessions] Control plane returned error:', response.status);
+      } catch (error) {
+        console.error('[Sessions] Failed to fetch from control plane:', error);
+      }
+    }
+
+    // Fallback: return empty list if control plane unavailable
+    return this.jsonResponse({ sessions: [], count: 0 });
   }
 
   /**

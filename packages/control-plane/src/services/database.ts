@@ -227,6 +227,111 @@ export async function deleteTenant(db: D1Database, id: string): Promise<void> {
   await db.prepare('DELETE FROM tenants WHERE id = ?').bind(id).run();
 }
 
+// Session operations
+export interface SessionRow {
+  id: string;
+  tenant_id: string;
+  user_id: string;
+  status: string;
+  metadata: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Session {
+  id: string;
+  tenantId: string;
+  userId: string;
+  status: string;
+  metadata: {
+    title?: string;
+    lastMessage?: string;
+    messageCount?: number;
+    totalInputTokens?: number;
+    totalOutputTokens?: number;
+  };
+  createdAt: string;
+  updatedAt: string;
+}
+
+function rowToSession(row: SessionRow): Session {
+  return {
+    id: row.id,
+    tenantId: row.tenant_id,
+    userId: row.user_id,
+    status: row.status,
+    metadata: JSON.parse(row.metadata || '{}'),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+export async function listSessionsForUser(
+  db: D1Database,
+  tenantId: string,
+  userId: string,
+  limit = 50
+): Promise<Session[]> {
+  const result = await db
+    .prepare(
+      `SELECT * FROM sessions
+       WHERE tenant_id = ? AND user_id = ?
+       ORDER BY updated_at DESC
+       LIMIT ?`
+    )
+    .bind(tenantId, userId, limit)
+    .all<SessionRow>();
+
+  return result.results.map(rowToSession);
+}
+
+export async function upsertSession(
+  db: D1Database,
+  session: {
+    id: string;
+    tenantId: string;
+    userId: string;
+    status?: string;
+    metadata?: Session['metadata'];
+  }
+): Promise<void> {
+  const now = new Date().toISOString();
+  const metadata = JSON.stringify(session.metadata || {});
+
+  await db
+    .prepare(
+      `INSERT INTO sessions (id, tenant_id, user_id, status, metadata, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         status = excluded.status,
+         metadata = excluded.metadata,
+         updated_at = excluded.updated_at`
+    )
+    .bind(
+      session.id,
+      session.tenantId,
+      session.userId,
+      session.status || 'active',
+      metadata,
+      now,
+      now
+    )
+    .run();
+}
+
+export async function getSession(
+  db: D1Database,
+  sessionId: string,
+  tenantId: string
+): Promise<Session | null> {
+  const row = await db
+    .prepare('SELECT * FROM sessions WHERE id = ? AND tenant_id = ?')
+    .bind(sessionId, tenantId)
+    .first<SessionRow>();
+
+  return row ? rowToSession(row) : null;
+}
+
 // Row types and converters
 interface UserRow {
   id: string;

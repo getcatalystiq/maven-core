@@ -6,7 +6,7 @@ import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { listSkillsForUser } from '../services/skills';
 import { listEnabledConnectors, getConnectorToken } from '../services/connectors';
-import { getUserById, getTenantBySlug, listTenants } from '../services/database';
+import { getUserById, getTenantBySlug, listTenants, listSessionsForUser, upsertSession } from '../services/database';
 import type { Env } from '../index';
 import type { SandboxConfig, SkillMetadata, ConnectorMetadata } from '@maven/shared';
 
@@ -161,6 +161,69 @@ app.get('/tenants', async (c) => {
       enabled: t.enabled,
     })),
   });
+});
+
+// List sessions for a user (for tenant worker to fetch session list)
+app.get('/sessions/:tenantId/:userId', async (c) => {
+  const tenantId = c.req.param('tenantId');
+  const userId = c.req.param('userId');
+
+  if (!tenantId || !userId) {
+    throw new HTTPException(400, { message: 'Missing tenantId or userId' });
+  }
+
+  const sessions = await listSessionsForUser(c.env.DB, tenantId, userId);
+
+  // Map to SessionSummary format expected by widget
+  return c.json({
+    sessions: sessions.map((s) => ({
+      sessionId: s.id,
+      title: s.metadata.title,
+      createdAt: s.createdAt,
+      updatedAt: s.updatedAt,
+      messageCount: s.metadata.messageCount || 0,
+      lastMessage: s.metadata.lastMessage || '',
+      totalCostUsd: 0, // TODO: Calculate from tokens
+      status: s.status,
+    })),
+    count: sessions.length,
+  });
+});
+
+// Upsert session (for tenant worker to create/update sessions)
+app.post('/sessions/:tenantId/:sessionId', async (c) => {
+  const tenantId = c.req.param('tenantId');
+  const sessionId = c.req.param('sessionId');
+
+  if (!tenantId || !sessionId) {
+    throw new HTTPException(400, { message: 'Missing tenantId or sessionId' });
+  }
+
+  const body = await c.req.json<{
+    userId: string;
+    status?: string;
+    metadata?: {
+      title?: string;
+      lastMessage?: string;
+      messageCount?: number;
+      totalInputTokens?: number;
+      totalOutputTokens?: number;
+    };
+  }>();
+
+  if (!body.userId) {
+    throw new HTTPException(400, { message: 'Missing userId' });
+  }
+
+  await upsertSession(c.env.DB, {
+    id: sessionId,
+    tenantId,
+    userId: body.userId,
+    status: body.status,
+    metadata: body.metadata,
+  });
+
+  return c.json({ success: true });
 });
 
 export { app as internalRoutes };
