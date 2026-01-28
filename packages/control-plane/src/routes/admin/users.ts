@@ -20,6 +20,7 @@ import {
   deleteUser,
 } from '../../services/database';
 import { deleteAllUserTokens } from '../../services/connectors';
+import { listSkillAssignmentsForUser } from '../../services/skills';
 import type { Env, Variables } from '../../index';
 
 const app = new Hono<{ Bindings: Env; Variables: Variables }>();
@@ -55,6 +56,20 @@ app.get('/:id', async (c) => {
 
   const { passwordHash, ...userWithoutPassword } = user;
   return c.json(userWithoutPassword);
+});
+
+// List skills assigned to user
+app.get('/:id/skills', async (c) => {
+  const userId = c.req.param('id');
+  const tenantId = c.get('tenantId');
+
+  const user = await getUserById(c.env.DB, userId);
+  if (!user || user.tenantId !== tenantId) {
+    throw new HTTPException(404, { message: 'User not found' });
+  }
+
+  const assignments = await listSkillAssignmentsForUser(c.env.DB, tenantId, userId);
+  return c.json({ assignments });
 });
 
 // Create user

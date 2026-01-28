@@ -69,13 +69,22 @@ function getSessionSkillsPath(sessionId: string): string {
   return `${SESSIONS_BASE_PATH}/${sessionId}/.claude/skills`;
 }
 
+/**
+ * Per-user config cache entry
+ */
+interface ConfigCacheEntry {
+  config: SandboxConfig;
+  timestamp: number;
+}
+
 export class TenantAgent extends DurableObject<Env> {
   private sandbox: Sandbox | null = null;
   private configHash: string | null = null;
   private agentProcess: ProcessInfo | null = null;
-  private cachedConfig: SandboxConfig | null = null;
-  private configCacheTime: number = 0;
+  // Cache configs per-user since different users have different skill access
+  private configCache: Map<string, ConfigCacheEntry> = new Map();
   private static readonly CONFIG_CACHE_TTL_MS = 60000; // 60 seconds
+  private static readonly CONFIG_CACHE_MAX_ENTRIES = 100; // Limit cache size
 
   // Session directory management
   private static readonly MAX_SESSION_DIRS = 50;
@@ -161,23 +170,33 @@ export class TenantAgent extends DurableObject<Env> {
       console.log(`[TIMING] T+${t()}ms: Reusing existing sandbox instance`);
     }
 
-    // FAST PATH: Use cached config if fresh and agent is running
+    // FAST PATH: Use per-user cached config if fresh
+    // IMPORTANT: Different users have different skill access, so cache must be per-user
     const now = Date.now();
-    const cacheAge = now - this.configCacheTime;
-    const cacheValid = this.cachedConfig && cacheAge < TenantAgent.CONFIG_CACHE_TTL_MS;
+    const cachedEntry = this.configCache.get(userId);
+    const cacheAge = cachedEntry ? now - cachedEntry.timestamp : Infinity;
+    const cacheValid = cachedEntry && cacheAge < TenantAgent.CONFIG_CACHE_TTL_MS;
 
     let config: SandboxConfig;
     if (cacheValid) {
       // Trust cache even if agent state unknown - we'll detect stale config via hash
       // This saves 500-800ms on warm path when sandbox wakes from sleep
-      console.log(`[TIMING] T+${t()}ms: Using cached config (age: ${cacheAge}ms) - FAST PATH`);
-      config = this.cachedConfig!;
+      console.log(`[TIMING] T+${t()}ms: Using cached config for user ${userId} (age: ${cacheAge}ms) - FAST PATH`);
+      config = cachedEntry!.config;
     } else {
       // Fetch configuration from Control Plane (cache stale or missing)
-      console.log(`[TIMING] T+${t()}ms: Fetching config from Control Plane (cache stale/missing)`);
+      console.log(`[TIMING] T+${t()}ms: Fetching config from Control Plane for user ${userId} (cache stale/missing)`);
       config = await this.fetchSandboxConfig(tenantId, userId);
-      this.cachedConfig = config;
-      this.configCacheTime = now;
+
+      // Evict oldest entry if cache is full
+      if (this.configCache.size >= TenantAgent.CONFIG_CACHE_MAX_ENTRIES) {
+        const oldestKey = this.configCache.keys().next().value;
+        if (oldestKey) {
+          this.configCache.delete(oldestKey);
+        }
+      }
+
+      this.configCache.set(userId, { config, timestamp: now });
       console.log(`[TIMING] T+${t()}ms: Config fetched (${config.skills.length} skills, ${config.connectors.length} connectors)`);
     }
 
