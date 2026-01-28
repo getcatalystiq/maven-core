@@ -468,14 +468,35 @@ export class TenantAgent extends DurableObject<Env> {
 
         console.log(`[TIMING] T+${t()}ms: Stream started successfully (attempt ${attempt + 1})`);
 
-        // Return the streaming response directly
-        // The agent's response is already a streaming NDJSON body
-        return new Response(response.body, {
+        // Diagnostic: Wrap body in TransformStream to log chunk arrival times
+        let chunkCount = 0;
+        let totalBytes = 0;
+        const { readable, writable } = new TransformStream({
+          transform(chunk, controller) {
+            chunkCount++;
+            totalBytes += chunk.length;
+            console.log(`[DIAG] T+${t()}ms: Chunk #${chunkCount} received: ${chunk.length} bytes (total: ${totalBytes})`);
+            controller.enqueue(chunk);
+          },
+          flush() {
+            console.log(`[DIAG] T+${t()}ms: Stream complete. ${chunkCount} chunks, ${totalBytes} bytes total`);
+          }
+        });
+
+        // Pipe container response to transform stream
+        response.body.pipeTo(writable).catch((error) => {
+          console.error(`[DIAG] T+${t()}ms: pipeTo error:`, error);
+        });
+
+        // Return the transformed readable stream
+        return new Response(readable, {
           headers: {
             'Content-Type': 'application/x-ndjson',
             'Cache-Control': 'no-cache, no-transform',
             'Connection': 'keep-alive',
             'X-Accel-Buffering': 'no',
+            'Content-Encoding': 'identity',
+            'Transfer-Encoding': 'chunked',
           },
         });
 
@@ -541,7 +562,14 @@ export class TenantAgent extends DurableObject<Env> {
       // to ensure proper streaming to the client
       if (response.body) {
         const { readable, writable } = new TransformStream();
-        response.body.pipeTo(writable);
+        response.body.pipeTo(writable).catch((error) => {
+          console.error('Stream pipe failed:', error);
+          try {
+            writable.abort(error);
+          } catch {
+            // Already closed, ignore
+          }
+        });
 
         return new Response(readable, {
           status: response.status,

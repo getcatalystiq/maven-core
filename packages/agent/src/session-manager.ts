@@ -141,7 +141,8 @@ export function getSession(sessionId: string): ManagedSession | null {
  */
 export async function* sendMessage(
   session: ManagedSession,
-  message: string
+  message: string,
+  signal?: AbortSignal
 ): AsyncGenerator<SDKMessage> {
   const t0 = Date.now();
   session.lastActivity = Date.now();
@@ -156,6 +157,12 @@ export async function* sendMessage(
     // Stream responses
     let firstResponse = true;
     for await (const msg of session.sdkSession.stream()) {
+      // Check if client disconnected
+      if (signal?.aborted) {
+        console.log(`[SESSION] Client disconnected, stopping stream for session ${session.id}`);
+        return;
+      }
+
       if (firstResponse) {
         console.log(`[SESSION] First response in ${Date.now() - t0}ms (type: ${msg.type})`);
         firstResponse = false;
