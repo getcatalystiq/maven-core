@@ -22,6 +22,9 @@ coverage/
 # Wrangler
 .wrangler/
 .tenant-config/
+wrangler-*.toml
+wrangler.toml
+
 
 # Environment files with secrets (never commit!)
 .dev.vars

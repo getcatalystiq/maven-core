@@ -20,6 +20,9 @@ export const passwordSchema = z
 // UUID validation
 export const uuidSchema = z.string().uuid();
 
+// Session ID validation (UUID format for security)
+export const sessionIdSchema = z.string().uuid('Session ID must be a valid UUID');
+
 // Tenant ID validation (UUID format)
 export const tenantIdSchema = z.string().uuid('Tenant ID must be a valid UUID');
 
@@ -194,7 +197,7 @@ export const oauthInitiateSchema = z.object({
 // Chat schemas
 export const chatRequestSchema = z.object({
   message: z.string().min(1).max(100000),
-  sessionId: z.string().optional(),
+  sessionId: sessionIdSchema.optional(),
   sessionPath: z.string().optional(), // Session workspace path for native skill loading
   skills: z.array(skillNameSchema).optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
@@ -225,3 +228,4 @@ export type LLMCredentials = z.infer<typeof llmCredentialsSchema>;
 export type AgentSettings = z.infer<typeof agentSettingsSchema>;
 export type UpdateTenantSettingsRequest = z.infer<typeof updateTenantSettingsSchema>;
 export type OAuthInitiateRequest = z.infer<typeof oauthInitiateSchema>;
+export type SessionId = z.infer<typeof sessionIdSchema>;

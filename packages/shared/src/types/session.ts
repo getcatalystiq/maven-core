@@ -78,3 +78,43 @@ export interface StreamEvent {
   type: 'content' | 'tool_use' | 'done' | 'error';
   data: unknown;
 }
+
+/**
+ * Session metadata stored in KV for persistence
+ * Key: session:{tenantId}:{sessionId}
+ * TTL: 90 days (SESSION_TTL_SECONDS)
+ */
+export interface SessionMetadata {
+  /** Owner user ID - validated on each request for security */
+  userId: string;
+  /** Session status */
+  status: SessionStatus;
+  /** ISO 8601 timestamp of session creation */
+  createdAt: string;
+  /** ISO 8601 timestamp of last activity */
+  lastActivity: string;
+  /** Number of messages in session */
+  messageCount: number;
+  /** Cumulative input tokens used */
+  totalInputTokens: number;
+  /** Cumulative output tokens used */
+  totalOutputTokens: number;
+}
+
+/**
+ * Message stored in R2 for history
+ * Path: sessions/{tenantId}/{sessionId}/{timestamp}.ndjson (batch files)
+ * TTL: 90 days (enforced via cleanup job)
+ */
+export interface StoredMessage {
+  /** Unique message ID */
+  id: string;
+  /** ISO 8601 timestamp */
+  timestamp: string;
+  /** Message role */
+  role: MessageRole;
+  /** Message content as text */
+  content: string;
+  /** Token usage for this message */
+  usage?: UsageStats;
+}

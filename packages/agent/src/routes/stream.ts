@@ -8,7 +8,7 @@
 import { Hono } from 'hono';
 import { zValidator } from '@hono/zod-validator';
 import { chatRequestSchema } from '@maven/shared';
-import { chat } from '../agent';
+import { chat, type SessionMode } from '../agent';
 
 const app = new Hono();
 
@@ -54,7 +54,19 @@ app.post(
 
     console.log(`[STREAM] T+${t()}ms: Request received`);
 
-    const { message, sessionId: requestedSessionId, sessionPath } = c.req.valid('json');
+    const validBody = c.req.valid('json');
+    const { message, sessionId: requestedSessionId, sessionPath } = validBody;
+
+    // Parse session mode from request body (sent by TenantAgent DO)
+    const rawSession = (validBody as { session?: { mode: string; sessionId?: string } }).session;
+    let session: SessionMode | undefined;
+    if (rawSession && rawSession.mode) {
+      if (rawSession.mode === 'resume' && rawSession.sessionId) {
+        session = { mode: 'resume', sessionId: rawSession.sessionId };
+      } else if (rawSession.mode === 'create' && rawSession.sessionId) {
+        session = { mode: 'create', sessionId: rawSession.sessionId };
+      }
+    }
 
     // Get context from headers (tenant required)
     const tenantId = c.req.header('X-Tenant-Id');
@@ -67,7 +79,7 @@ app.post(
     // Generate session ID if not provided
     const sessionId = requestedSessionId || crypto.randomUUID();
 
-    console.log(`[STREAM] T+${t()}ms: Parsed request, session=${sessionId}, sessionPath=${sessionPath || 'none'}`);
+    console.log(`[STREAM] T+${t()}ms: Parsed request, session=${sessionId}, sessionPath=${sessionPath || 'none'}, mode=${session?.mode || 'none'}`);
 
     const encoder = new TextEncoder();
 
@@ -116,10 +128,10 @@ app.post(
           console.log(`[STREAM] T+${t()}ms: Emitted start event`);
 
           // Use V1 chat() which has includePartialMessages: true for streaming
-          console.log(`[STREAM] T+${t()}ms: Starting V1 chat() with sessionPath=${sessionPath || 'none'}...`);
+          console.log(`[STREAM] T+${t()}ms: Starting V1 chat() with sessionPath=${sessionPath || 'none'}, mode=${session?.mode || 'none'}...`);
 
           for await (const msg of chat(message, {
-            sessionId,
+            session, // Session mode (create/resume) for multi-turn conversations
             sessionPath, // Session workspace path for native skill loading
             tenantId,
             userId,

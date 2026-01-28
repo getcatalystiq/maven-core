@@ -95,8 +95,17 @@ import { query, type SDKMessage, type McpServerConfig } from '@anthropic-ai/clau
 import { loadSkills, filterSkillsByRoles, buildSystemPromptFromSkills } from './skills/loader';
 import { buildMcpServers, parseConnectorsFromEnv } from './mcp/servers';
 
+/**
+ * Session mode discriminated union - prevents invalid states
+ * like resume=true without sessionId
+ */
+export type SessionMode =
+  | { mode: 'new' }                              // No session tracking
+  | { mode: 'create'; sessionId: string }        // Create new session with ID
+  | { mode: 'resume'; sessionId: string };       // Resume existing session
+
 export interface ChatOptions {
-  sessionId?: string;
+  session?: SessionMode;
   sessionPath?: string; // Session workspace path for native skill loading
   tenantId: string;
   userId: string;
@@ -132,13 +141,18 @@ export interface ChatResult {
  * - settingSources: ['project'] to load skills from {cwd}/.claude/skills/
  * - Skill added to allowedTools
  *
+ * Session handling:
+ * - mode='create': First message - uses extra_args with session-id
+ * - mode='resume': Subsequent messages - uses resume with sessionId
+ * - mode='new' or undefined: No session tracking
+ *
  * systemPrompt is kept as fallback for environments without native skill support.
  */
 function buildQueryOptions(
   systemPrompt: string,
   mcpServers: Record<string, McpServerConfig>,
   model?: string,
-  resume?: string,
+  session?: SessionMode,
   sessionPath?: string
 ) {
   // Use sessionPath for native skill loading, fall back to WORKSPACE_PATH or cwd
@@ -152,8 +166,8 @@ function buildQueryOptions(
     ? ['Skill', 'Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep']
     : ['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep'];
 
-  const options = {
-    resume,
+  // Build base options
+  const options: Record<string, unknown> = {
     model: model || process.env.ANTHROPIC_MODEL || DEFAULT_BEDROCK_MODEL,
     includePartialMessages: true,
     permissionMode: 'bypassPermissions' as const,
@@ -167,23 +181,38 @@ function buildQueryOptions(
     mcpServers: Object.keys(mcpServers).length > 0 ? mcpServers : undefined,
     // Path to globally installed Claude CLI (npm install -g @anthropic-ai/claude-code)
     pathToClaudeCodeExecutable: '/usr/local/bin/claude',
-    // Disable session persistence to avoid filesystem writes and slow session loading
-    persistSession: false,
+    // Enable session persistence for multi-turn conversations
+    persistSession: true,
     // Capture stderr from Claude Code subprocess for debugging
     stderr: (data: string) => {
       console.log('[SDK STDERR]', data.trim());
     },
   };
+
+  // Handle session mode
+  if (session && session.mode !== 'new') {
+    if (session.mode === 'resume') {
+      // Resume existing session - SDK looks up session by ID
+      options.resume = session.sessionId;
+    } else if (session.mode === 'create') {
+      // Create new session with explicit ID (widget's ID)
+      // SDK accepts custom session IDs via extra_args
+      options.extraArgs = { 'session-id': session.sessionId };
+    }
+  }
+
   console.log('Query options:', {
     model: options.model,
     cwd: options.cwd,
     useNativeSkills,
     settingSources: useNativeSkills ? ['project'] : undefined,
     permissionMode: options.permissionMode,
-    resume: options.resume,
+    sessionMode: session?.mode,
+    sessionId: session && session.mode !== 'new' ? session.sessionId : undefined,
     mcpServersCount: Object.keys(mcpServers).length,
     systemPromptLength: systemPrompt.length,
     allowedTools: options.allowedTools,
+    persistSession: options.persistSession,
   });
   return options;
 }
@@ -256,19 +285,18 @@ export async function* chat(
     },
   } as TimingEvent;
 
-  // NOTE: Session resume disabled - widget-generated sessionIds don't exist in
-  // Claude CLI's session storage (~/.claude/), causing 6+ second delays when
-  // the SDK tries to load non-existent sessions. Always start fresh queries.
-  // TODO: Re-enable resume only for sessions that originated from Claude SDK responses.
+  // Session handling:
+  // - mode='create': First message with explicit session ID (avoids 6s delay from resume lookup)
+  // - mode='resume': Subsequent messages that should continue the conversation
+  // - mode='new' or undefined: No session persistence (legacy behavior)
 
-  // Start new session
   // Use sessionPath for native skill loading if provided
   const sessionPath = options.sessionPath || process.env.SESSION_PATH;
-  console.log(`[CHAT] T+${t()}ms: Starting Claude SDK query() (sessionPath: ${sessionPath || 'none'})...`);
+  console.log(`[CHAT] T+${t()}ms: Starting Claude SDK query() (sessionPath: ${sessionPath || 'none'}, session: ${JSON.stringify(options.session)})...`);
   const sdkStart = Date.now();
   const result = query({
     prompt: message,
-    options: buildQueryOptions(systemPrompt, mcpServers, options.model, undefined, sessionPath),
+    options: buildQueryOptions(systemPrompt, mcpServers, options.model, options.session, sessionPath),
   });
 
   let firstYield = true;

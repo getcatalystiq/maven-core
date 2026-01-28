@@ -51,7 +51,12 @@ new_sqlite_classes = ["Sandbox"]
 #   image = "registry.cloudflare.com/{ACCOUNT_ID}/maven-agent:{VERSION}"
 #   instance_type = "basic"
 
-# R2 bucket for agent logs
+# KV Namespace for session metadata (shared with control-plane)
+[[kv_namespaces]]
+binding = "KV"
+id = "5c9cee2d2257426b90100142a4a81053"
+
+# R2 bucket for agent logs and session history
 [[r2_buckets]]
 binding = "LOGS"
 bucket_name = "maven-files"

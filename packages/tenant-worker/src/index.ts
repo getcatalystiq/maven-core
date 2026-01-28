@@ -28,7 +28,10 @@ export interface Env {
   // Sandbox SDK binding (for production - Cloudflare Sandbox)
   Sandbox: DurableObjectNamespace<Sandbox>;
 
-  // R2 bucket for agent logs
+  // KV namespace for session metadata
+  KV?: KVNamespace;
+
+  // R2 bucket for agent logs and session history
   LOGS: R2Bucket;
 
   // JWT Configuration

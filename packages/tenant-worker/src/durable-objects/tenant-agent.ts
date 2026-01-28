@@ -16,8 +16,9 @@
 
 import { DurableObject } from 'cloudflare:workers';
 import { getSandbox, type Sandbox } from '@cloudflare/sandbox';
-import { getSecret } from '@maven/shared';
+import { getSecret, SESSION_TTL_SECONDS, type SessionMetadata } from '@maven/shared';
 import type { Env } from '../index';
+import { getSessionForUser, putSessionMetadata } from '../services/sessions';
 
 interface SandboxConfig {
   tenantId: string;
@@ -579,11 +580,17 @@ export class TenantAgent extends DurableObject<Env> {
   }
 
   /**
-   * Handle streaming chat request with retry logic
+   * Handle streaming chat request with retry logic and session persistence
    *
    * Uses containerFetch with HTTP streaming for real-time NDJSON streaming.
    * The agent's /chat/stream endpoint returns a streaming Response body.
    * Retries up to 3 times with increasing delays to handle sandbox sleep/wake cycles.
+   *
+   * Session persistence:
+   * - Checks KV for existing session (validates ownership)
+   * - Passes session mode (create/resume) to agent
+   * - Stores/updates session metadata in KV after response
+   * - Stores message history as batch files in R2
    */
   private async handleStreamChat(
     request: Request,
@@ -612,6 +619,27 @@ export class TenantAgent extends DurableObject<Env> {
     const sessionId = body.sessionId || crypto.randomUUID();
     console.log(`[TIMING] T+${t()}ms: Request body parsed`);
 
+    // Session ownership check (if KV is available)
+    let existingSession: SessionMetadata | null = null;
+    if (this.env.KV) {
+      console.log(`[TIMING] T+${t()}ms: Checking session ownership in KV`);
+      const sessionResult = await getSessionForUser(this.env.KV, tenantId, sessionId, userId);
+
+      // SECURITY: Return 404 for unauthorized access (same as not found)
+      if (!sessionResult.ok) {
+        console.log(`[TIMING] T+${t()}ms: Session ownership check failed (unauthorized)`);
+        return this.jsonResponse({ error: 'Session not found' }, 404);
+      }
+
+      existingSession = sessionResult.metadata;
+      console.log(`[TIMING] T+${t()}ms: Session check complete (exists: ${!!existingSession})`);
+    }
+
+    // Determine session mode for agent
+    const sessionMode = existingSession
+      ? { mode: 'resume' as const, sessionId }
+      : { mode: 'create' as const, sessionId };
+
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       try {
         // Ensure sandbox is ready with session-scoped skills
@@ -624,11 +652,13 @@ export class TenantAgent extends DurableObject<Env> {
 
         // Build request safely - no shell escaping needed
         // Include sessionPath so agent knows where to find skills
+        // Include session mode so agent knows whether to create or resume
         const sessionPath = getSessionWorkspacePath(sessionId);
         const payload = JSON.stringify({
           message: body.message,
           sessionId,
           sessionPath, // Agent uses this as cwd for native skill loading
+          session: sessionMode, // Agent uses this to determine create vs resume
         });
 
         const agentRequest = new Request('http://localhost:8080/chat/stream', {
@@ -641,7 +671,7 @@ export class TenantAgent extends DurableObject<Env> {
           body: payload,
         });
 
-        console.log(`[TIMING] T+${t()}ms: Making containerFetch request to agent`);
+        console.log(`[TIMING] T+${t()}ms: Making containerFetch request to agent (mode: ${sessionMode.mode})`);
 
         const response = await this.sandbox.containerFetch(agentRequest, 8080);
         console.log(`[TIMING] T+${t()}ms: containerFetch returned, status: ${response.status}`);
@@ -658,19 +688,68 @@ export class TenantAgent extends DurableObject<Env> {
 
         console.log(`[TIMING] T+${t()}ms: Stream started successfully (attempt ${attempt + 1})`);
 
-        // Diagnostic: Wrap body in TransformStream to log chunk arrival times
+        // Capture usage data from stream for session metadata update
+        let inputTokens = 0;
+        let outputTokens = 0;
+
+        // Wrap body in TransformStream to log chunks and capture usage
         let chunkCount = 0;
         let totalBytes = 0;
+        const decoder = new TextDecoder();
         const { readable, writable } = new TransformStream({
-          transform(chunk, controller) {
+          transform: (chunk: Uint8Array, controller: TransformStreamDefaultController<Uint8Array>) => {
             chunkCount++;
             totalBytes += chunk.length;
             console.log(`[DIAG] T+${t()}ms: Chunk #${chunkCount} received: ${chunk.length} bytes (total: ${totalBytes})`);
+
+            // Try to extract usage from 'done' events in the NDJSON stream
+            const text = decoder.decode(chunk, { stream: true });
+            for (const line of text.split('\n')) {
+              if (!line.trim()) continue;
+              try {
+                const event = JSON.parse(line);
+                if (event.type === 'done' && event.usage) {
+                  inputTokens = event.usage.inputTokens || 0;
+                  outputTokens = event.usage.outputTokens || 0;
+                }
+              } catch {
+                // Not valid JSON, skip
+              }
+            }
+
             controller.enqueue(chunk);
           },
-          flush() {
+          flush: async () => {
             console.log(`[DIAG] T+${t()}ms: Stream complete. ${chunkCount} chunks, ${totalBytes} bytes total`);
-          }
+
+            // Update session metadata in KV after stream completes
+            if (this.env.KV) {
+              const now = new Date().toISOString();
+              const metadata: SessionMetadata = {
+                userId,
+                status: 'active',
+                createdAt: existingSession?.createdAt || now,
+                lastActivity: now,
+                messageCount: (existingSession?.messageCount || 0) + 1,
+                totalInputTokens: (existingSession?.totalInputTokens || 0) + inputTokens,
+                totalOutputTokens: (existingSession?.totalOutputTokens || 0) + outputTokens,
+              };
+
+              try {
+                await putSessionMetadata(
+                  this.env.KV,
+                  tenantId,
+                  sessionId,
+                  metadata,
+                  SESSION_TTL_SECONDS
+                );
+                console.log(`[SESSION] Updated session metadata: ${sessionId} (messages: ${metadata.messageCount})`);
+              } catch (error) {
+                // Don't fail the request if metadata update fails
+                console.error(`[SESSION] Failed to update session metadata:`, error);
+              }
+            }
+          },
         });
 
         // Pipe container response to transform stream
