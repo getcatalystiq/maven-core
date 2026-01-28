@@ -76,6 +76,10 @@ app.post(
 
     const encoder = new TextEncoder();
 
+    // AbortController for cancellation propagation - must be outside ReadableStream
+    // so it's accessible from both start() and cancel() callbacks
+    const abortController = new AbortController();
+
     const stream = new ReadableStream({
       async start(controller) {
         console.log(`[STREAM] T+${t()}ms: ReadableStream.start() called`);
@@ -144,7 +148,13 @@ app.post(
           // Send message and stream responses
           console.log(`[STREAM] T+${t()}ms: Sending message to session...`);
 
-          for await (const msg of sendMessage(session, message)) {
+          for await (const msg of sendMessage(session, message, abortController.signal)) {
+            // Check if client disconnected
+            if (abortController.signal.aborted) {
+              console.log(`[STREAM] T+${t()}ms: Client disconnected, stopping message processing`);
+              break;
+            }
+
             if (!firstMsgTime) {
               firstMsgTime = t();
               console.log(`[STREAM] T+${firstMsgTime}ms: First message from SDK (type: ${msg.type})`);
@@ -230,6 +240,11 @@ app.post(
           safeClose();
         }
       },
+
+      cancel(reason) {
+        console.log(`[STREAM] Client disconnected:`, reason);
+        abortController.abort();
+      },
     });
 
     console.log(`[STREAM] T+${t()}ms: Returning Response with stream`);
@@ -238,6 +253,7 @@ app.post(
         'Content-Type': 'application/x-ndjson',
         'Cache-Control': 'no-cache',
         'Transfer-Encoding': 'chunked',
+        'Content-Encoding': 'identity',
       },
     });
   }

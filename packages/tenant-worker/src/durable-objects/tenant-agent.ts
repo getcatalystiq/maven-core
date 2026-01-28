@@ -476,6 +476,8 @@ export class TenantAgent extends DurableObject<Env> {
             'Cache-Control': 'no-cache, no-transform',
             'Connection': 'keep-alive',
             'X-Accel-Buffering': 'no',
+            'Content-Encoding': 'identity',
+            'Transfer-Encoding': 'chunked',
           },
         });
 
@@ -541,7 +543,14 @@ export class TenantAgent extends DurableObject<Env> {
       // to ensure proper streaming to the client
       if (response.body) {
         const { readable, writable } = new TransformStream();
-        response.body.pipeTo(writable);
+        response.body.pipeTo(writable).catch((error) => {
+          console.error('Stream pipe failed:', error);
+          try {
+            writable.abort(error);
+          } catch {
+            // Already closed, ignore
+          }
+        });
 
         return new Response(readable, {
           status: response.status,
