@@ -55,17 +55,12 @@ app.post(
     console.log(`[STREAM] T+${t()}ms: Request received`);
 
     const validBody = c.req.valid('json');
-    const { message, sessionId: requestedSessionId, sessionPath } = validBody;
+    const { message, sessionId: requestedSessionId, sessionPath, session: validatedSession } = validBody;
 
-    // Parse session mode from request body (sent by TenantAgent DO)
-    const rawSession = (validBody as { session?: { mode: string; sessionId?: string } }).session;
+    // Convert validated session to SessionMode type
     let session: SessionMode | undefined;
-    if (rawSession && rawSession.mode) {
-      if (rawSession.mode === 'resume' && rawSession.sessionId) {
-        session = { mode: 'resume', sessionId: rawSession.sessionId };
-      } else if (rawSession.mode === 'create' && rawSession.sessionId) {
-        session = { mode: 'create', sessionId: rawSession.sessionId };
-      }
+    if (validatedSession) {
+      session = validatedSession as SessionMode;
     }
 
     // Get context from headers (tenant required)

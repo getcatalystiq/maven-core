@@ -29,7 +29,9 @@ JWT_ISSUER = "https://maven.example.com"
 JWT_KEY_ID = "maven-key-1"
 # Agent container image tag - update this when pushing new versions
 # Run: npx wrangler vars put AGENT_IMAGE_TAG --value "vX.Y.Z" --name maven-control-plane
-AGENT_IMAGE_TAG = "v1.3.20"
+AGENT_IMAGE_TAG = "v1.3.22"
+# Allowed origins for OAuth redirect URI validation
+CORS_ALLOWED_ORIGINS = "https://maven-widget-test.pages.dev,https://maven-admin.tools-7b7.workers.dev,http://localhost:8787,http://localhost:8788,http://localhost:3000"
 
 # Cloudflare Secrets Store bindings (shared secrets across workers)
 # @see https://developers.cloudflare.com/secrets-store/

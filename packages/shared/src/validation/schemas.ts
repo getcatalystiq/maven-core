@@ -194,11 +194,18 @@ export const oauthInitiateSchema = z.object({
   redirectUri: z.string().url(),
 });
 
+// Session mode schema for multi-turn conversations
+export const sessionModeSchema = z.discriminatedUnion('mode', [
+  z.object({ mode: z.literal('create'), sessionId: sessionIdSchema }),
+  z.object({ mode: z.literal('resume'), sessionId: sessionIdSchema }),
+]);
+
 // Chat schemas
 export const chatRequestSchema = z.object({
   message: z.string().min(1).max(100000),
   sessionId: sessionIdSchema.optional(),
   sessionPath: z.string().optional(), // Session workspace path for native skill loading
+  session: sessionModeSchema.optional(), // Session mode for multi-turn conversations
   skills: z.array(skillNameSchema).optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
 });
