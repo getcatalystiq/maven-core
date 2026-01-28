@@ -6,6 +6,7 @@ export interface Connector {
   id: string;
   tenantId: string;
   name: string;
+  description?: string;        // Human-readable description for widget display
   type: ConnectorType;
   config: ConnectorConfig;
   oauthClientId?: string;      // OAuth client ID (discovery via MCP server URL)
@@ -47,6 +48,7 @@ export interface ConnectorToken {
 
 export interface ConnectorCreateRequest {
   name: string;
+  description?: string;        // Human-readable description
   type: ConnectorType;
   config: ConnectorConfig;
   oauthClientId?: string;      // OAuth client ID
@@ -56,6 +58,7 @@ export interface ConnectorCreateRequest {
 
 export interface ConnectorUpdateRequest {
   name?: string;
+  description?: string;
   config?: Partial<ConnectorConfig>;
   oauthScopes?: string[];
   enabled?: boolean;

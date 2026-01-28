@@ -5,61 +5,15 @@
 
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
+import { generateCodeVerifier, generateCodeChallenge } from '@maven/shared';
 import {
   getConnectorById,
   setOAuthState,
-  discoverOAuthEndpoints,
+  discoverOAuthEndpointsCached,
   getMcpServerUrl,
+  validateRedirectUri,
 } from '../../services/connectors';
 import type { Env, Variables } from '../../index';
-
-/**
- * Validate that a redirect URI is allowed
- * Only allows callbacks to our own domain
- */
-function validateRedirectUri(requestUrl: string, redirectUri: string): boolean {
-  try {
-    const requestOrigin = new URL(requestUrl).origin;
-    const redirectUrl = new URL(redirectUri);
-
-    // Only allow redirects to the same origin as the request
-    // This prevents open redirect attacks
-    return redirectUrl.origin === requestOrigin;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Generate a cryptographically secure code verifier for PKCE
- * RFC 7636: 43-128 characters from unreserved characters
- */
-function generateCodeVerifier(): string {
-  const array = new Uint8Array(32);
-  crypto.getRandomValues(array);
-  return base64UrlEncode(array);
-}
-
-/**
- * Generate code challenge from verifier using S256 method
- */
-async function generateCodeChallenge(verifier: string): Promise<string> {
-  const encoder = new TextEncoder();
-  const data = encoder.encode(verifier);
-  const digest = await crypto.subtle.digest('SHA-256', data);
-  return base64UrlEncode(new Uint8Array(digest));
-}
-
-/**
- * Base64 URL encoding (RFC 4648)
- */
-function base64UrlEncode(buffer: Uint8Array): string {
-  let binary = '';
-  for (let i = 0; i < buffer.length; i++) {
-    binary += String.fromCharCode(buffer[i]);
-  }
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
-}
 
 const app = new Hono<{ Bindings: Env; Variables: Variables }>();
 
@@ -68,6 +22,12 @@ app.get('/:connectorId', async (c) => {
   const tenantId = c.get('tenantId');
   const userId = c.get('userId');
 
+  // Validate connectorId is a valid UUID
+  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (!uuidRegex.test(connectorId)) {
+    throw new HTTPException(400, { message: 'Invalid connector ID format' });
+  }
+
   // Build default redirect URI using our own domain
   const defaultRedirectUri = `${new URL(c.req.url).origin}/oauth/${connectorId}/callback`;
 
@@ -75,9 +35,9 @@ app.get('/:connectorId', async (c) => {
   const redirectUri = c.req.query('redirect_uri') || defaultRedirectUri;
 
   // Validate redirect URI to prevent open redirect attacks
-  if (!validateRedirectUri(c.req.url, redirectUri)) {
+  if (!validateRedirectUri(c.env, redirectUri)) {
     throw new HTTPException(400, {
-      message: 'Invalid redirect_uri: must be on the same domain',
+      message: 'Invalid redirect_uri: not in allowed origins',
     });
   }
 
@@ -91,15 +51,16 @@ app.get('/:connectorId', async (c) => {
   const mcpServerUrl = getMcpServerUrl(connector);
   if (!mcpServerUrl) {
     throw new HTTPException(400, {
-      message: 'Connector does not have an MCP server URL (requires http or sse type)',
+      message: 'Connector does not support OAuth (requires http or sse type)',
     });
   }
 
-  // Discover OAuth endpoints from MCP server
-  const oauthMetadata = await discoverOAuthEndpoints(mcpServerUrl);
+  // Discover OAuth endpoints from MCP server (cached)
+  const oauthMetadata = await discoverOAuthEndpointsCached(c.env.KV, mcpServerUrl);
   if (!oauthMetadata) {
+    console.error(`OAuth discovery failed for connector ${connectorId}`);
     throw new HTTPException(400, {
-      message: `MCP server does not support OAuth discovery at ${mcpServerUrl}/.well-known/oauth-authorization-server`,
+      message: 'Connector MCP server does not support OAuth discovery',
     });
   }
 

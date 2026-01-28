@@ -170,6 +170,7 @@ export const connectorConfigSchema = z.discriminatedUnion('type', [
 
 export const createConnectorSchema = z.object({
   name: connectorNameSchema,
+  description: z.string().max(500).optional(),
   type: z.enum(['stdio', 'sse', 'http']),
   config: connectorConfigSchema,
   oauthClientId: z.string().optional(),
@@ -179,9 +180,15 @@ export const createConnectorSchema = z.object({
 
 export const updateConnectorSchema = z.object({
   name: connectorNameSchema.optional(),
+  description: z.string().max(500).optional(),
   config: connectorConfigSchema.optional(),
   oauthScopes: z.array(z.string()).optional(),
   enabled: z.boolean().optional(),
+});
+
+// Widget-specific schemas
+export const oauthInitiateSchema = z.object({
+  redirectUri: z.string().url(),
 });
 
 // Chat schemas
@@ -217,3 +224,4 @@ export type LLMProvider = z.infer<typeof llmProviderSchema>;
 export type LLMCredentials = z.infer<typeof llmCredentialsSchema>;
 export type AgentSettings = z.infer<typeof agentSettingsSchema>;
 export type UpdateTenantSettingsRequest = z.infer<typeof updateTenantSettingsSchema>;
+export type OAuthInitiateRequest = z.infer<typeof oauthInitiateSchema>;

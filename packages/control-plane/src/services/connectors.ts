@@ -10,6 +10,44 @@ import type {
   HttpConfig,
 } from '@maven/shared';
 
+// Environment type for redirect validation
+interface EnvWithCors {
+  CORS_ALLOWED_ORIGINS?: string;
+}
+
+/**
+ * Validate redirect URI against allowed origins
+ * Uses CORS_ALLOWED_ORIGINS env var or defaults to common development origins
+ */
+export function validateRedirectUri(env: EnvWithCors, redirectUri: string): boolean {
+  try {
+    const redirectUrl = new URL(redirectUri);
+    const redirectOrigin = redirectUrl.origin;
+
+    // Default allowed origins for development
+    const defaultOrigins = [
+      'http://localhost:8787',
+      'http://localhost:8788',
+      'http://127.0.0.1:8787',
+      'http://127.0.0.1:8788',
+    ];
+
+    // Parse configured origins or use defaults
+    const allowedOriginsStr = env.CORS_ALLOWED_ORIGINS || '';
+    const configuredOrigins = allowedOriginsStr
+      ? allowedOriginsStr.split(',').map((o) => o.trim()).filter(Boolean)
+      : [];
+
+    const allowedOrigins = configuredOrigins.length > 0
+      ? configuredOrigins
+      : defaultOrigins;
+
+    return allowedOrigins.includes(redirectOrigin);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Discover OAuth endpoints from MCP server's well-known configuration
  * Per RFC 8414: https://datatracker.ietf.org/doc/html/rfc8414
@@ -19,9 +57,17 @@ export async function discoverOAuthEndpoints(
 ): Promise<OAuthServerMetadata | null> {
   try {
     const wellKnownUrl = new URL('/.well-known/oauth-authorization-server', mcpServerUrl);
+
+    // Add timeout to prevent hanging on slow servers
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
+
     const response = await fetch(wellKnownUrl.toString(), {
       headers: { Accept: 'application/json' },
+      signal: controller.signal,
     });
+
+    clearTimeout(timeoutId);
 
     if (!response.ok) {
       console.log(`No OAuth discovery at ${wellKnownUrl}: ${response.status}`);
@@ -44,6 +90,32 @@ export async function discoverOAuthEndpoints(
 }
 
 /**
+ * Discover OAuth endpoints with KV caching (1 hour TTL)
+ * Reduces latency for repeated OAuth initiations
+ */
+export async function discoverOAuthEndpointsCached(
+  kv: KVNamespace,
+  mcpServerUrl: string
+): Promise<OAuthServerMetadata | null> {
+  const cacheKey = `oauth_discovery:${mcpServerUrl}`;
+
+  // Check cache first
+  const cached = await kv.get<OAuthServerMetadata>(cacheKey, 'json');
+  if (cached) {
+    return cached;
+  }
+
+  // Fetch fresh metadata
+  const metadata = await discoverOAuthEndpoints(mcpServerUrl);
+  if (metadata) {
+    // Cache for 1 hour
+    await kv.put(cacheKey, JSON.stringify(metadata), { expirationTtl: 3600 });
+  }
+
+  return metadata;
+}
+
+/**
  * Get MCP server URL from connector config
  */
 export function getMcpServerUrl(connector: Connector): string | null {
@@ -63,13 +135,14 @@ export async function createConnector(
 
   await db
     .prepare(
-      `INSERT INTO connectors (id, tenant_id, name, type, config, oauth_client_id, oauth_scopes, enabled, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO connectors (id, tenant_id, name, description, type, config, oauth_client_id, oauth_scopes, enabled, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .bind(
       connector.id,
       connector.tenantId,
       connector.name,
+      connector.description || null,
       connector.type,
       JSON.stringify(connector.config),
       connector.oauthClientId || null,
@@ -144,14 +217,18 @@ export async function listEnabledConnectors(
 export async function updateConnector(
   db: D1Database,
   id: string,
-  updates: Partial<Pick<Connector, 'name' | 'config' | 'oauthScopes' | 'enabled'>>
+  updates: Partial<Pick<Connector, 'name' | 'description' | 'config' | 'oauthScopes' | 'enabled'>>
 ): Promise<void> {
   const setClauses: string[] = [];
-  const values: (string | number)[] = [];
+  const values: (string | number | null)[] = [];
 
   if (updates.name !== undefined) {
     setClauses.push('name = ?');
     values.push(updates.name);
+  }
+  if (updates.description !== undefined) {
+    setClauses.push('description = ?');
+    values.push(updates.description);
   }
   if (updates.config !== undefined) {
     setClauses.push('config = ?');
@@ -323,6 +400,7 @@ interface ConnectorRow {
   id: string;
   tenant_id: string;
   name: string;
+  description: string | null;
   type: string;
   config: string;
   oauth_client_id: string | null;
@@ -336,6 +414,7 @@ function rowToConnector(row: ConnectorRow): Connector {
     id: row.id,
     tenantId: row.tenant_id,
     name: row.name,
+    description: row.description || undefined,
     type: row.type as Connector['type'],
     config: JSON.parse(row.config) as ConnectorConfig,
     oauthClientId: row.oauth_client_id || undefined,

@@ -19,6 +19,7 @@ import type { Secret } from '@maven/shared';
 import { authRoutes } from './routes/auth';
 import { adminRoutes } from './routes/admin';
 import { oauthRoutes } from './routes/oauth';
+import { widgetRoutes } from './routes/widget';
 import { internalRoutes } from './routes/internal';
 import { jwtAuth, adminAuth, internalAuth } from './middleware/auth';
 import { rateLimitMiddleware } from './middleware/ratelimit';
@@ -121,6 +122,10 @@ app.route('/oauth', oauthRoutes);
 // Admin routes (admin auth required)
 app.use('/admin/*', jwtAuth, adminAuth, rateLimitMiddleware);
 app.route('/admin', adminRoutes);
+
+// Widget routes (JWT auth only, no admin role required)
+app.use('/widget/*', jwtAuth, rateLimitMiddleware);
+app.route('/widget', widgetRoutes);
 
 // Internal routes (for tenant-worker/sandbox to fetch config)
 app.use('/internal/*', internalAuth);
