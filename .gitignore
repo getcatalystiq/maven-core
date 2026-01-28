@@ -21,11 +21,16 @@ coverage/
 
 # Wrangler
 .wrangler/
-.dev.vars
 .tenant-config/
+
+# Environment files with secrets (never commit!)
+.dev.vars
+packages/*/.dev.vars
+packages/*/.env
 
 # Local development keys
 .keys/
+*.pem
 
 # Local dev server state
 .pids/

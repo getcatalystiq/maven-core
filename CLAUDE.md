@@ -76,9 +76,9 @@ npm run tenant dev <slug>                 # Local dev with tenant config
 npm run tenant list                       # List all tenants
 
 # Examples
-npm run tenant deploy easycarnet
-npm run tenant deploy easycarnet --dry-run
-AGENT_IMAGE_TAG=v2.0.0 npm run tenant deploy easycarnet
+npm run tenant deploy my-tenant
+npm run tenant deploy my-tenant --dry-run
+AGENT_IMAGE_TAG=v2.0.0 npm run tenant deploy my-tenant
 ```
 
 **Why must you use the tenant CLI?**
@@ -325,7 +325,7 @@ const publicKey = await getSecret(env.JWT_PUBLIC_KEY);
 | `maven-cf-api-token` | Secrets Store | ✅ | - | - | - |
 | `JWT_PRIVATE_KEY` | Per-worker | ✅ | - | - | - |
 
-Store ID: `4f06aa96622946a4b336737a727e9354`
+Store ID: `YOUR_SECRETS_STORE_ID`
 
 **Note:** JWT_PRIVATE_KEY exceeds Secrets Store size limit (~1.7KB > 1KB limit), so it remains a per-worker secret for control-plane only.
 
@@ -338,11 +338,11 @@ Pro and Enterprise tier tenants get dedicated workers with Durable Objects and S
 1. **Cloudflare credentials** in Secrets Store (control-plane needs these to deploy workers):
    ```bash
    # Add CF_ACCOUNT_ID
-   npx wrangler secrets-store secret create 4f06aa96622946a4b336737a727e9354 \
+   npx wrangler secrets-store secret create YOUR_SECRETS_STORE_ID \
      --name maven-cf-account-id --scopes workers --remote
 
    # Add CF_API_TOKEN (needs Workers write permissions)
-   npx wrangler secrets-store secret create 4f06aa96622946a4b336737a727e9354 \
+   npx wrangler secrets-store secret create YOUR_SECRETS_STORE_ID \
      --name maven-cf-api-token --scopes workers --remote
    ```
 
@@ -385,13 +385,13 @@ Pro and Enterprise tier tenants get dedicated workers with Durable Objects and S
 
 ```bash
 # Get admin JWT token, then:
-curl -X POST https://maven-control-plane.tools-7b7.workers.dev/admin/tenants/provision \
+curl -X POST https://your-control-plane.workers.dev/admin/tenants/provision \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"name":"TenantName","slug":"tenant-slug","tier":"pro"}'
 
 # Check provisioning status
-curl https://maven-control-plane.tools-7b7.workers.dev/admin/tenants/provision/$JOB_ID \
+curl https://your-control-plane.workers.dev/admin/tenants/provision/$JOB_ID \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -407,12 +407,12 @@ curl https://maven-control-plane.tools-7b7.workers.dev/admin/tenants/provision/$
 # In wrangler.toml
 [[secrets_store_secrets]]
 binding = "JWT_PUBLIC_KEY"
-store_id = "4f06aa96622946a4b336737a727e9354"
+store_id = "YOUR_SECRETS_STORE_ID"
 secret_name = "maven-jwt-public-key"
 
 [[secrets_store_secrets]]
 binding = "INTERNAL_API_KEY"
-store_id = "4f06aa96622946a4b336737a727e9354"
+store_id = "YOUR_SECRETS_STORE_ID"
 secret_name = "maven-internal-api-key"
 ```
 

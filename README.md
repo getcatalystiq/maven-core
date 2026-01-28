@@ -1,5 +1,7 @@
 # Maven Core
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 A TypeScript framework for building and managing AI agents on Cloudflare.
 
 ## Features
@@ -20,7 +22,7 @@ A TypeScript framework for building and managing AI agents on Cloudflare.
 └─────────────────────────────────────────────────────────────────┘
                                 ↓
 ┌─────────────────────────────────────────────────────────────────┐
-│                    Cloudflare Worker (Controller)                │
+│                 Cloudflare Worker (Control Plane)                │
 │  • Routes requests        • Auth (JWT RS256)                    │
 │  • Admin endpoints        • Skills/Connectors CRUD              │
 │  • Tenant provisioning    • Rate limiting                       │
@@ -41,51 +43,87 @@ A TypeScript framework for building and managing AI agents on Cloudflare.
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-## Installation
+## Quick Start
+
+### Prerequisites
+
+- Node.js 20+
+- Docker
+- Bun (for agent development)
+
+### Installation
 
 ```bash
-npm install
-npm run build
+# Clone the repository
+git clone https://github.com/YOUR_USERNAME/maven-core.git
+cd maven-core
+
+# First-time setup (installs deps, generates keys, runs migrations)
+npm run setup
+
+# Start development servers
+npm run dev:start
 ```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed setup instructions.
 
 ## Development
 
-### Controller (Cloudflare Worker)
+### Control Plane (Cloudflare Worker)
 
 ```bash
-cd packages/controller
+cd packages/control-plane
 
 # Run locally
-npm run dev
+npm run dev       # Port 8787
 
 # Deploy
 npm run deploy
 ```
 
+### Tenant Worker (Cloudflare Worker)
+
+```bash
+# Local development
+cd packages/tenant-worker
+npm run dev       # Port 8788
+
+# Deploy (use tenant CLI)
+npm run tenant deploy <slug>
+```
+
 ### Agent (Container)
 
 ```bash
-cd packages/agent
+# Run in Docker (recommended)
+docker compose up agent     # Port 8080
 
-# Run locally
-npm run dev
-
-# Build Docker image
-docker build -t maven-agent .
+# View logs
+docker compose logs -f agent
 ```
 
 ## Configuration
 
-Set secrets in Cloudflare:
+### Local Development
+
+The setup script generates `.dev.vars` files with local development keys. For production, set secrets in Cloudflare:
 
 ```bash
-cd packages/controller
+cd packages/control-plane
 
 # Required secrets
-npx wrangler secret put ANTHROPIC_API_KEY
 npx wrangler secret put JWT_PRIVATE_KEY
 npx wrangler secret put JWT_PUBLIC_KEY
 npx wrangler secret put INTERNAL_API_KEY
+```
+
+### Cloudflare Resources
+
+Copy the example wrangler configs and fill in your resource IDs:
+
+```bash
+cp packages/control-plane/wrangler.toml.example packages/control-plane/wrangler.toml
+cp packages/tenant-worker/wrangler.toml.example packages/tenant-worker/wrangler.toml
 ```
 
 ## API Endpoints
@@ -126,12 +164,16 @@ packages/
 │       ├── crypto/   # JWT, password hashing
 │       └── validation/ # Zod schemas
 │
-├── controller/       # Cloudflare Worker
+├── control-plane/    # Cloudflare Worker (Admin API)
 │   └── src/
 │       ├── routes/   # API endpoints
 │       ├── middleware/ # Auth, rate limiting
-│       ├── services/ # Business logic
-│       └── durable-objects/
+│       └── services/ # Business logic
+│
+├── tenant-worker/    # Cloudflare Worker (Per-Tenant)
+│   └── src/
+│       ├── middleware/ # JWT auth
+│       └── durable-objects/ # TenantAgent
 │
 └── agent/            # Agent container
     └── src/
@@ -140,6 +182,14 @@ packages/
         └── mcp/      # MCP configuration
 ```
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+## Security
+
+See [SECURITY.md](SECURITY.md) for reporting vulnerabilities.
+
 ## License
 
-MIT
+[MIT](LICENSE)

@@ -1,0 +1,157 @@
+# Maven Tenant Worker - Wrangler Configuration
+#
+# Copy this file to wrangler.toml and fill in your Cloudflare resource IDs:
+#   cp wrangler.toml.example wrangler.toml
+#
+# ============================================================================
+# WARNING: DO NOT RUN `wrangler deploy` DIRECTLY
+# ============================================================================
+# This config is a BASE TEMPLATE. Container config is injected dynamically.
+#
+# ALWAYS USE: npm run tenant deploy <slug>
+#
+# The tenant CLI script generates container config per tenant:
+#   - Container name: maven-tenant-{slug}-sandbox
+#   - Image tag: controlled by AGENT_IMAGE_TAG env var (default: v1.0.0)
+#
+# Example:
+#   npm run tenant deploy my-tenant
+#   AGENT_IMAGE_TAG=v2.0.0 npm run tenant deploy my-tenant
+# ============================================================================
+
+name = "maven-tenant"
+main = "src/index.ts"
+compatibility_date = "2025-01-23"
+compatibility_flags = ["nodejs_compat"]
+
+# Enable observability
+[observability]
+enabled = true
+
+# Durable Objects
+[[durable_objects.bindings]]
+name = "TENANT_AGENT"
+class_name = "TenantAgent"
+
+# Sandbox Durable Object binding (for container access)
+[[durable_objects.bindings]]
+name = "Sandbox"
+class_name = "Sandbox"
+
+# Migrations
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["TenantAgent"]
+
+# Sandbox migration for dedicated tenant deployments
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["Sandbox"]
+
+# Container for agent sandbox (injected by tenant.sh script)
+# The tenant CLI script generates container config dynamically:
+#   [[containers]]
+#   name = "maven-tenant-{SLUG}-sandbox"
+#   class_name = "Sandbox"
+#   image = "registry.cloudflare.com/{ACCOUNT_ID}/maven-agent:{VERSION}"
+#   instance_type = "basic"
+
+# R2 bucket for agent logs
+[[r2_buckets]]
+binding = "LOGS"
+bucket_name = "maven-files"
+
+# Environment variables
+[vars]
+JWT_ISSUER = "https://maven.example.com"
+CONTROL_PLANE_URL = "https://your-control-plane.workers.dev"
+# Tenant-specific vars (overridden via --var for dedicated deployments)
+TENANT_ID = ""
+TENANT_SLUG = ""
+AWS_REGION = "us-east-1"
+
+# Cloudflare Secrets Store bindings (shared secrets across workers)
+# Uses same store as control-plane
+# @see https://developers.cloudflare.com/secrets-store/
+[[secrets_store_secrets]]
+binding = "JWT_PUBLIC_KEY"
+store_id = "YOUR_SECRETS_STORE_ID"
+secret_name = "maven-jwt-public-key"
+
+[[secrets_store_secrets]]
+binding = "INTERNAL_API_KEY"
+store_id = "YOUR_SECRETS_STORE_ID"
+secret_name = "maven-internal-api-key"
+
+# Per-worker secrets (not shared via Secrets Store):
+# wrangler secret put ANTHROPIC_API_KEY (if using Anthropic API directly)
+# wrangler secret put AWS_ACCESS_KEY_ID (if using Bedrock)
+# wrangler secret put AWS_SECRET_ACCESS_KEY (if using Bedrock)
+
+# Local development server config
+[dev]
+port = 8788
+
+# Development configuration
+[env.development]
+name = "maven-tenant-dev"
+
+[env.development.vars]
+AGENT_URL = "http://localhost:8080"
+CONTROL_PLANE_URL = "http://localhost:8787"
+
+# Production configuration
+[env.production]
+name = "maven-tenant"
+
+[env.production.vars]
+JWT_ISSUER = "https://maven.example.com"
+CONTROL_PLANE_URL = "https://your-control-plane.workers.dev"
+TENANT_ID = ""
+TENANT_SLUG = ""
+AWS_REGION = "us-east-1"
+
+# Secrets Store bindings for production
+[[env.production.secrets_store_secrets]]
+binding = "JWT_PUBLIC_KEY"
+store_id = "YOUR_SECRETS_STORE_ID"
+secret_name = "maven-jwt-public-key"
+
+[[env.production.secrets_store_secrets]]
+binding = "INTERNAL_API_KEY"
+store_id = "YOUR_SECRETS_STORE_ID"
+secret_name = "maven-internal-api-key"
+
+# Durable Object for production
+[[env.production.durable_objects.bindings]]
+name = "TENANT_AGENT"
+class_name = "TenantAgent"
+
+# R2 bucket for agent logs (production)
+[[env.production.r2_buckets]]
+binding = "LOGS"
+bucket_name = "maven-files"
+
+# Migrations for production
+[[env.production.migrations]]
+tag = "v1"
+new_sqlite_classes = ["TenantAgent"]
+
+# ============================================================================
+# DEPLOYMENT INSTRUCTIONS
+# ============================================================================
+# ALWAYS USE THE TENANT CLI - NEVER RUN wrangler deploy DIRECTLY
+#
+# Deploy a tenant:
+#   npm run tenant deploy <slug>
+#
+# Deploy with specific image version:
+#   AGENT_IMAGE_TAG=v1.0.0 npm run tenant deploy <slug>
+#
+# Preview deployment (dry run):
+#   npm run tenant deploy <slug> --dry-run
+#
+# Other commands:
+#   npm run tenant dev <slug>    # Local dev with tenant config
+#   npm run tenant list          # List all tenants
+# ============================================================================

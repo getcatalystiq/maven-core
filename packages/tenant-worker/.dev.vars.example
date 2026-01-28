@@ -1,0 +1,28 @@
+# Maven Tenant Worker - Local Development Environment
+#
+# Copy this file to .dev.vars and fill in your values:
+#   cp .dev.vars.example .dev.vars
+#
+# Or run: npm run setup (generates keys automatically)
+
+# JWT Public Key (RS256) - Must match control-plane
+JWT_PUBLIC_KEY="-----BEGIN PUBLIC KEY-----
+YOUR_PUBLIC_KEY_HERE
+-----END PUBLIC KEY-----"
+
+# Internal API key - Must match control-plane
+INTERNAL_API_KEY="your-internal-api-key"
+
+# Local development URLs
+AGENT_URL="http://localhost:8080"
+CONTROL_PLANE_URL="http://localhost:8787"
+
+# Choose ONE of the following credential options for the agent:
+
+# Option 1: Direct Anthropic API
+# ANTHROPIC_API_KEY="sk-ant-api..."
+
+# Option 2: AWS Bedrock
+# AWS_ACCESS_KEY_ID="AKIA..."
+# AWS_SECRET_ACCESS_KEY="..."
+# AWS_REGION="us-east-1"

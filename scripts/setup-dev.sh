@@ -18,6 +18,39 @@ echo ""
 
 cd "$PROJECT_ROOT"
 
+# Check prerequisites
+echo -e "${BLUE}Checking prerequisites...${NC}"
+
+# Check Node.js version
+if ! command -v node &> /dev/null; then
+  echo -e "${RED}Error: Node.js is not installed${NC}"
+  echo "Please install Node.js 20+ from https://nodejs.org/"
+  exit 1
+fi
+
+NODE_VERSION=$(node -v | cut -d'v' -f2 | cut -d'.' -f1)
+if [ "$NODE_VERSION" -lt 20 ]; then
+  echo -e "${RED}Error: Node.js 20+ is required (found v$(node -v))${NC}"
+  exit 1
+fi
+echo -e "  ${GREEN}✓${NC} Node.js $(node -v)"
+
+# Check Docker (optional but recommended)
+if command -v docker &> /dev/null; then
+  echo -e "  ${GREEN}✓${NC} Docker $(docker --version | cut -d' ' -f3 | tr -d ',')"
+else
+  echo -e "  ${YELLOW}!${NC} Docker not found (optional, needed for agent container)"
+fi
+
+# Check Bun (optional, needed for agent development)
+if command -v bun &> /dev/null; then
+  echo -e "  ${GREEN}✓${NC} Bun $(bun --version)"
+else
+  echo -e "  ${YELLOW}!${NC} Bun not found (optional, needed for agent development)"
+fi
+
+echo ""
+
 # Step 1: Install dependencies
 echo -e "${BLUE}[1/5] Installing dependencies...${NC}"
 npm install

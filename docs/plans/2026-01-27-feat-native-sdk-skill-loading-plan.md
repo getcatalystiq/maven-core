@@ -3,6 +3,7 @@ title: Native SDK Skill Loading for Multi-Tenant Sessions
 type: feat
 date: 2026-01-27
 deepened: 2026-01-27
+updated: 2026-01-27
 ---
 
 # Native SDK Skill Loading for Multi-Tenant Sessions
@@ -10,6 +11,7 @@ deepened: 2026-01-27
 ## Enhancement Summary
 
 **Deepened on:** 2026-01-27
+**Updated on:** 2026-01-27 (V1 API now in use)
 **Research agents used:** TypeScript Reviewer, Security Sentinel, Architecture Strategist, Performance Oracle, Code Simplicity Reviewer, Agent-Native Reviewer, Pattern Recognition, SDK Docs Researcher, Best Practices Researcher, Repo Research Analyst
 
 ### Key Improvements
@@ -18,12 +20,14 @@ deepened: 2026-01-27
 3. Clarified SDK path discovery behavior (`settingSources: ['project']` uses `{cwd}/.claude/skills/`)
 4. Added alternative simpler approach to consider before implementation
 5. Enhanced cleanup patterns with LRU eviction and state machine
+6. **V1 API Update**: Confirmed V1 is now in use in `stream.ts` - remaining work is adding `settingSources`
 
 ### Critical Findings from Research
 
 | Finding | Source | Impact |
 |---------|--------|--------|
-| V2 API does NOT support `settingSources` | SDK Docs Research | Confirms V1 is required |
+| V2 API does NOT support `settingSources` | SDK Docs Research | ✅ V1 now in use |
+| V2 API does NOT support `includePartialMessages` | Streaming Fix | ✅ V1 now in use |
 | Skills not hot-reloadable during session | SDK Docs Research | Must inject before SDK starts |
 | Session IDs can be client-supplied | Security Review | **CRITICAL**: Must validate |
 | MCP connectors contain user OAuth tokens | Codebase Analysis | MCPs must be per-session too |
@@ -70,14 +74,19 @@ This approach has three problems:
 
 ### Claude Agent SDK Skill Support
 
-**Critical finding**: The SDK supports native skill loading, but with constraints:
+**Status: V1 Confirmed and In Use**
 
-| API | Native Skills | Warm Starts | MCP Servers |
-|-----|--------------|-------------|-------------|
-| V1 `query()` | Yes (via `settingSources`) | No | Yes |
-| V2 `unstable_v2_createSession()` | **No** | Yes | No |
+As of 2026-01-27, we switched to V1 `query()` API in `stream.ts` because:
+- V2 Session API doesn't support `includePartialMessages: true` (required for streaming)
+- V2 Session API doesn't support `settingSources` (required for native skill loading)
 
-The V2 API, currently used in `session-manager.ts` for warm starts, **does not support `settingSources`**. This means native skill loading is only available with V1, which lacks warm start performance.
+| API | In Use | Native Skills | Streaming | Warm Starts |
+|-----|--------|--------------|-----------|-------------|
+| V1 `query()` | **Yes** | Yes (via `settingSources`) | Yes | No |
+| V2 `createSession()` | No | No | No | Yes |
+
+The `stream.ts` route now uses V1 via `chat()` from `agent.ts`. The V2 `session-manager.ts`
+is no longer used for the main streaming path but remains for potential future use.
 
 ### Research Insights: SDK Path Discovery Behavior
 
@@ -299,14 +308,14 @@ private isValidSessionId(sessionId: string): boolean {
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### API Decision: V1 with Optimization
+### API Status: V1 In Use
 
-**Recommendation**: Use V1 `query()` with `settingSources` for native skill loading.
+**Current Implementation** (as of 2026-01-27):
+- `packages/agent/src/routes/stream.ts` uses V1 via `chat()` function
+- `packages/agent/src/agent.ts` contains the V1 `query()` call with `includePartialMessages: true`
+- Cold start penalty mitigated by Cloudflare Sandbox warm pools
 
-Rationale:
-- V2 cannot support native skills until SDK adds `settingSources`
-- V1's "cold start" penalty is mitigated by Cloudflare Sandbox warm pools
-- Native skill loading reduces per-turn token usage, offsetting startup cost
+**Remaining Work**: Add `settingSources: ['project']` and `cwd` configuration to enable native skill discovery.
 
 ### Research Insights: Performance Trade-offs
 
@@ -365,37 +374,42 @@ export function getSessionSkillsPath(sessionId: string): string {
 }
 ```
 
-### Phase 2: V1 API Migration
+### Phase 2: Add Native Skill Support
+
+V1 is already in use. The remaining work is adding `settingSources` configuration.
 
 **Files to modify:**
 
 1. `packages/agent/src/agent.ts`
-   - Replace custom skill loading with SDK native discovery
+   - Add `cwd` parameter to `chat()` function signature
    - Add `settingSources: ['project']` to query options
    - Add `Skill` to `allowedTools`
-   - Remove `systemPrompt` skill injection
+   - Remove `systemPrompt` skill injection (after verification)
    - **Add stderr callback for error monitoring**
 
 ```typescript
-// Before
-const skills = filterSkillsByRoles(allSkills, userRoles);
-const systemPrompt = buildSystemPromptFromSkills(skills);
-
+// Current (in chat() function)
 const result = query({
-  prompt: message,
+  prompt,
   options: {
-    systemPrompt,
-    // no settingSources
+    model,
+    includePartialMessages: true,
+    permissionMode: 'bypassPermissions',
+    allowedTools: ['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep'],
+    systemPrompt,  // <-- Contains skill descriptions (remove after native works)
   },
 });
 
 // After
 const result = query({
-  prompt: message,
+  prompt,
   options: {
-    cwd: sessionWorkspacePath,  // /home/maven/sessions/{sessionId}
-    settingSources: ['project'], // Enables .claude/skills discovery
-    allowedTools: ['Skill', 'Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep'],
+    model,
+    includePartialMessages: true,
+    permissionMode: 'bypassPermissions',
+    cwd: sessionWorkspacePath,  // <-- ADD: Session workspace for skill discovery
+    settingSources: ['project'], // <-- ADD: Enable native skill loading
+    allowedTools: ['Skill', 'Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep'], // <-- ADD Skill
     // systemPrompt removed - SDK handles skill descriptions
 
     // Monitor skill loading errors
@@ -634,18 +648,18 @@ Use symlinks to expose different skill subsets per session.
 
 Continue with prompt injection until SDK team adds `settingSources` to V2 API.
 
-**Rejected because:**
-- No timeline for V2 feature
-- Token inefficiency is a current production concern
-- V1 API is stable and sufficient
+**No longer applicable** (V1 already in use as of 2026-01-27):
+- V1 switch was required for streaming support (`includePartialMessages: true`)
+- V2 doesn't support required features for our use case
 
 ### 4. Hybrid: V2 for Streaming, V1 for Skill Loading
 
 Use V2 for message streaming but V1 `query()` once per session to load skills.
 
-**Considered viable but deferred:**
-- Complex session state management
-- Could be future optimization if V1 cold start is problematic
+**No longer applicable** (V1 already handles both):
+- V1 with `includePartialMessages: true` provides streaming
+- V1 with `settingSources` will provide native skill loading
+- No need for hybrid approach
 
 ### 5. Control Plane Filtering Only
 
@@ -663,7 +677,7 @@ Filter skills by role in control plane's `/internal/config` endpoint.
 ### Resolved
 
 1. **Q: Should we use V1 or V2 API?**
-   A: V1 with `settingSources` for native skill loading.
+   A: V1 with `settingSources` for native skill loading. **Now implemented** - `stream.ts` uses V1 via `chat()` function (2026-01-27).
 
 2. **Q: How to isolate concurrent sessions?**
    A: Per-session skill directories at `/home/maven/sessions/{sessionId}/.claude/skills/`
@@ -726,12 +740,15 @@ The agent-native reviewer identified that while this plan improves token efficie
 - [ ] Test concurrent sessions with different roles
 - [ ] Test concurrent sessions with different MCP connectors/OAuth tokens
 
-### Phase 2: V1 Migration
+### Phase 2: Native Skill Support (V1 already in use)
 
-- [ ] Update `agent.ts` to use V1 `query()` with `settingSources`
-- [ ] Add `cwd` configuration from request body
+- [x] Switch to V1 API in stream.ts (DONE - 2026-01-27)
+- [ ] Update `agent.ts` to accept `cwd` parameter
+- [ ] Add `settingSources: ['project']` to query options
+- [ ] Add `Skill` to allowedTools
 - [ ] Add stderr callback for error monitoring
 - [ ] Monitor SDK init message for loaded skills
+- [ ] Remove manual systemPrompt skill injection (after verification)
 
 ### Phase 3: Cleanup
 
@@ -753,10 +770,11 @@ The agent-native reviewer identified that while this plan improves token efficie
 
 ### Internal References
 
+- **V1 Chat (in use)**: `packages/agent/src/agent.ts` - `chat()` function with `includePartialMessages: true`
+- **Stream route (V1)**: `packages/agent/src/routes/stream.ts` - Uses `chat()` for streaming
+- **Session manager (V2, unused)**: `packages/agent/src/session-manager.ts` - Not used by main path
 - Agent skill loading: `packages/agent/src/skills/loader.ts:23-60`
-- Prompt building: `packages/agent/src/agent.ts:89-103`
 - Skill injection: `packages/tenant-worker/src/durable-objects/tenant-agent.ts:181-200`
-- Session manager: `packages/agent/src/session-manager.ts:45-72`
 - Session ID generation: `packages/tenant-worker/src/durable-objects/tenant-agent.ts:425`
 - Existing cleanup patterns: `packages/agent/src/session-manager.ts:234-255`
 - DO alarm cleanup: `packages/tenant-worker/src/durable-objects/tenant-agent.ts:875-942`
@@ -772,7 +790,8 @@ The agent-native reviewer identified that while this plan improves token efficie
 ### Related Work
 
 - Recent commit: `8e938eb refactor: remove unused WebSocket code, use HTTP streaming only`
-- V2 Session API: `be5efec feat(agent): implement V2 Session API for warm starts`
+- **V1 Switch**: `5fb92c4 fix(streaming): switch to V1 query API for real-time streaming` (2026-01-27)
+- V2 Session API (unused): `be5efec feat(agent): implement V2 Session API for warm starts`
 
 ### Research Sources
 
