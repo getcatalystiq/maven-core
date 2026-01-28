@@ -79,6 +79,7 @@ app.post(
         console.log(`[STREAM] T+${t()}ms: ReadableStream.start() called`);
 
         let receivedResult = false;
+        let receivedStreamEvents = false;  // Track if we got incremental stream events
         let firstMsgTime: number | null = null;
         let controllerClosed = false;
         let sdkSessionId: string | undefined;
@@ -155,7 +156,17 @@ app.post(
               );
             } else if (msg.type === 'stream_event') {
               // Incremental streaming event - this is the key for real-time streaming!
-              // Pass through directly for widget to consume
+              receivedStreamEvents = true;
+
+              // Filter out "summary" content_block_delta events (no index = final summary, skip it)
+              // SDK sends both incremental deltas (with index) and a final complete delta (without index)
+              const event = msg.event as { type?: string; index?: number };
+              if (event.type === 'content_block_delta' && event.index === undefined) {
+                console.log(`[STREAM] T+${t()}ms: Skipping summary delta (no index)`);
+                continue;
+              }
+
+              // Pass through incremental events for widget to consume
               safeEnqueue(
                 encoder.encode(ndjsonLine({
                   type: 'stream',
@@ -163,7 +174,12 @@ app.post(
                 }))
               );
             } else if (msg.type === 'assistant') {
-              // Complete assistant message (fallback if stream_event not available)
+              // Complete assistant message - SKIP if we already got stream events (avoid duplicates)
+              if (receivedStreamEvents) {
+                console.log(`[STREAM] T+${t()}ms: Skipping assistant message (already streamed)`);
+                continue;
+              }
+              // Fallback: emit as stream if no stream_event was received
               for (const block of msg.message.content) {
                 if (block.type === 'text') {
                   safeEnqueue(
