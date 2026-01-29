@@ -688,9 +688,10 @@ export class TenantAgent extends DurableObject<Env> {
 
         console.log(`[TIMING] T+${t()}ms: Stream started successfully (attempt ${attempt + 1})`);
 
-        // Capture usage data from stream for session metadata update
+        // Capture usage data and assistant response from stream for session storage
         let inputTokens = 0;
         let outputTokens = 0;
+        let assistantResponse = '';
 
         // Wrap body in TransformStream to log chunks and capture usage
         let chunkCount = 0;
@@ -702,15 +703,23 @@ export class TenantAgent extends DurableObject<Env> {
             totalBytes += chunk.length;
             console.log(`[DIAG] T+${t()}ms: Chunk #${chunkCount} received: ${chunk.length} bytes (total: ${totalBytes})`);
 
-            // Try to extract usage from 'done' events in the NDJSON stream
+            // Try to extract usage and content from NDJSON stream
             const text = decoder.decode(chunk, { stream: true });
             for (const line of text.split('\n')) {
               if (!line.trim()) continue;
               try {
                 const event = JSON.parse(line);
+                // Capture usage from done event
                 if (event.type === 'done' && event.usage) {
                   inputTokens = event.usage.inputTokens || 0;
                   outputTokens = event.usage.outputTokens || 0;
+                }
+                // Capture text content from content_block_delta
+                if (event.type === 'stream' && event.event?.type === 'content_block_delta') {
+                  const delta = event.event.delta;
+                  if (delta?.type === 'text_delta' && delta.text) {
+                    assistantResponse += delta.text;
+                  }
                 }
               } catch {
                 // Not valid JSON, skip
@@ -777,6 +786,29 @@ export class TenantAgent extends DurableObject<Env> {
                 console.log(`[SESSION] Updated session in D1: ${sessionId}`);
               } catch (error) {
                 console.error(`[SESSION] Failed to update session in D1:`, error);
+              }
+            }
+
+            // Store messages in R2 for history retrieval
+            if (this.env.LOGS) {
+              try {
+                const timestamp = Date.now();
+                const historyKey = `sessions/${tenantId}/${sessionId}/${timestamp}.ndjson`;
+
+                // Store both user message and assistant response as NDJSON
+                const messages = [
+                  { role: 'user', content: body.message, timestamp: now },
+                  { role: 'assistant', content: assistantResponse, timestamp: now },
+                ];
+                const ndjson = messages.map(m => JSON.stringify(m)).join('\n');
+
+                await this.env.LOGS.put(historyKey, ndjson, {
+                  httpMetadata: { contentType: 'application/x-ndjson' },
+                  customMetadata: { tenantId, sessionId, userId },
+                });
+                console.log(`[SESSION] Stored message history in R2: ${historyKey}`);
+              } catch (error) {
+                console.error(`[SESSION] Failed to store messages in R2:`, error);
               }
             }
           },
@@ -885,14 +917,40 @@ export class TenantAgent extends DurableObject<Env> {
   }
 
   /**
-   * Handle session listing - fetches from control-plane D1
+   * Handle session routes:
+   * - GET /sessions - list all sessions
+   * - GET /sessions/:sessionId - get session history
    */
   private async handleSessions(
-    _request: Request,
+    request: Request,
     tenantId: string,
     userId: string
   ): Promise<Response> {
-    // Fetch sessions from control-plane (D1 database)
+    const url = new URL(request.url);
+    const pathParts = url.pathname.split('/').filter(Boolean);
+
+    // Check if this is a specific session request: /sessions/:sessionId
+    const sessionsIndex = pathParts.indexOf('sessions');
+    const sessionId = sessionsIndex >= 0 && pathParts.length > sessionsIndex + 1
+      ? pathParts[sessionsIndex + 1]
+      : null;
+
+    if (sessionId) {
+      // GET /sessions/:sessionId - fetch history
+      return this.handleSessionHistory(tenantId, sessionId, userId);
+    }
+
+    // GET /sessions - list all sessions
+    return this.handleSessionList(tenantId, userId);
+  }
+
+  /**
+   * List all sessions for user - fetches from control-plane D1
+   */
+  private async handleSessionList(
+    tenantId: string,
+    userId: string
+  ): Promise<Response> {
     if (this.env.CONTROL_PLANE_URL && this.env.INTERNAL_API_KEY) {
       try {
         const internalKey = await getSecret(this.env.INTERNAL_API_KEY);
@@ -916,8 +974,67 @@ export class TenantAgent extends DurableObject<Env> {
       }
     }
 
-    // Fallback: return empty list if control plane unavailable
     return this.jsonResponse({ sessions: [], count: 0 });
+  }
+
+  /**
+   * Fetch session history from R2
+   * Returns messages stored as NDJSON batch files
+   */
+  private async handleSessionHistory(
+    tenantId: string,
+    sessionId: string,
+    userId: string
+  ): Promise<Response> {
+    // First verify session ownership via KV
+    if (this.env.KV) {
+      const result = await getSessionForUser(this.env.KV, tenantId, sessionId, userId);
+      if (!result.ok) {
+        return this.jsonResponse({ error: 'Session not found' }, 404);
+      }
+    }
+
+    // Fetch message history from R2
+    const messages: Array<{ role: string; content: string; timestamp: string }> = [];
+
+    if (this.env.LOGS) {
+      try {
+        // List all batch files for this session
+        const prefix = `sessions/${tenantId}/${sessionId}/`;
+        const listed = await this.env.LOGS.list({ prefix });
+
+        // Sort by key (timestamp) and fetch each file
+        const sortedObjects = listed.objects.sort((a, b) => a.key.localeCompare(b.key));
+
+        for (const obj of sortedObjects) {
+          const file = await this.env.LOGS.get(obj.key);
+          if (file) {
+            const text = await file.text();
+            // Parse NDJSON - each line is a message
+            const lines = text.split('\n').filter(line => line.trim());
+            for (const line of lines) {
+              try {
+                const msg = JSON.parse(line);
+                messages.push({
+                  role: msg.role,
+                  content: msg.content,
+                  timestamp: msg.timestamp,
+                });
+              } catch {
+                // Skip malformed lines
+              }
+            }
+          }
+        }
+      } catch (error) {
+        console.error('[SessionHistory] Failed to fetch from R2:', error);
+      }
+    }
+
+    return this.jsonResponse({
+      sessionId,
+      messages,
+    });
   }
 
   /**
