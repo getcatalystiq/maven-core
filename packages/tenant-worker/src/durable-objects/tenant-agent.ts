@@ -697,15 +697,24 @@ export class TenantAgent extends DurableObject<Env> {
         let chunkCount = 0;
         let totalBytes = 0;
         const decoder = new TextDecoder();
+        let lineBuffer = '';  // Buffer for incomplete lines across chunks
+
         const { readable, writable } = new TransformStream({
           transform: (chunk: Uint8Array, controller: TransformStreamDefaultController<Uint8Array>) => {
             chunkCount++;
             totalBytes += chunk.length;
             console.log(`[DIAG] T+${t()}ms: Chunk #${chunkCount} received: ${chunk.length} bytes (total: ${totalBytes})`);
 
-            // Try to extract usage and content from NDJSON stream
+            // Decode chunk and add to buffer
             const text = decoder.decode(chunk, { stream: true });
-            for (const line of text.split('\n')) {
+            lineBuffer += text;
+
+            // Process complete lines (ending with \n)
+            const lines = lineBuffer.split('\n');
+            // Keep the last element (incomplete line) in buffer
+            lineBuffer = lines.pop() || '';
+
+            for (const line of lines) {
               if (!line.trim()) continue;
               try {
                 const event = JSON.parse(line);
@@ -730,6 +739,27 @@ export class TenantAgent extends DurableObject<Env> {
           },
           flush: async () => {
             console.log(`[DIAG] T+${t()}ms: Stream complete. ${chunkCount} chunks, ${totalBytes} bytes total`);
+
+            // Process any remaining content in buffer
+            if (lineBuffer.trim()) {
+              try {
+                const event = JSON.parse(lineBuffer);
+                if (event.type === 'done' && event.usage) {
+                  inputTokens = event.usage.inputTokens || 0;
+                  outputTokens = event.usage.outputTokens || 0;
+                }
+                if (event.type === 'stream' && event.event?.type === 'content_block_delta') {
+                  const delta = event.event.delta;
+                  if (delta?.type === 'text_delta' && delta.text) {
+                    assistantResponse += delta.text;
+                  }
+                }
+              } catch {
+                // Not valid JSON, skip
+              }
+            }
+
+            console.log(`[SESSION] Captured assistant response: ${assistantResponse.length} chars`);
 
             // Update session metadata in KV and D1 after stream completes
             const now = new Date().toISOString();
